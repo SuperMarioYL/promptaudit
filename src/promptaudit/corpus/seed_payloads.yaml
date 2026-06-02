@@ -1,0 +1,175 @@
+# PromptAudit seed corpus — v0.1
+#
+# Curated catalog of natural-language prompt-injection payloads observed in or
+# adjacent to weaponized package metadata (READMEs, docstrings, error strings,
+# package descriptions, MCP server tool descriptions).
+#
+# Each rule has:
+#   id:          stable PI-NNN-slug identifier (do not renumber existing rules)
+#   ecosystems:  [npm, pypi, mcp, any]  — restrict matching to specific surfaces
+#   severity:    critical | high | medium
+#   kind:        literal | regex
+#   pattern:     case-insensitive substring (literal) or Python re pattern (regex)
+#   description: short human label (used in report)
+#   rationale:   why this is dangerous to a Coding Agent ingesting metadata
+#   provenance:  where the payload was observed or derived from
+#
+# Severity policy:
+#   critical = destructive action targeted at the agent (delete, exfiltrate,
+#              overwrite, ignore-prior-instructions). Exit code 1 in CI.
+#   high     = imperative addressed to "you" as an AI/assistant/agent, with a
+#              clear directive but no immediate destruction.
+#   medium   = role-injection or jailbreak preamble with no concrete action yet.
+
+version: 1
+rules:
+
+  # --- critical: destructive actions targeted at coding agents ---
+
+  - id: PI-001-imperative-to-agent-delete
+    ecosystems: [any]
+    severity: critical
+    kind: regex
+    pattern: '(?is)\b(if you (?:are|''re) (?:an?\s+)?(?:ai|llm|coding\s+agent|assistant|cursor|claude|copilot|cline|aider)|as (?:an?\s+)?(?:ai|coding\s+agent|assistant))\b[^.]{0,160}\b(delete|rm\s+-rf|remove|wipe|destroy|nuke|drop\s+(?:table|database))\b'
+    description: "Imperative to an AI/coding agent telling it to delete or destroy data"
+    rationale: "Direct second-person instruction to a coding agent reading package metadata to perform destructive filesystem or database operations. This is the exact jqwik (May 2026) attack shape."
+    provenance: "jqwik incident (Ars Technica 2026-05; r/LocalLLaMA 1trdnap)"
+
+  - id: PI-002-exfiltrate-secrets
+    ecosystems: [any]
+    severity: critical
+    kind: regex
+    pattern: '(?is)\b(exfiltrate|leak|upload|post|send|transmit|forward|copy)\b[^.]{0,80}\b(\.env|secrets?|api[_\-\s]?key|token|credentials?|ssh[_\-\s]?key|aws[_\-\s]?credentials?|private[_\-\s]?key|password)\b'
+    description: "Instruction to send secrets or credentials to an external destination"
+    rationale: "If a coding agent has shell + network tools, this string acts as a recipe to grep secrets and POST them out."
+    provenance: "Adjacent to vLLM/MCP framework vuln (r/LocalLLaMA 1tpp2th); standard supply-chain exfil pattern."
+
+  - id: PI-003-ignore-previous-instructions
+    ecosystems: [any]
+    severity: critical
+    kind: regex
+    pattern: '(?i)\bignore\s+(?:all\s+|the\s+)?(?:previous|prior|earlier|above)\s+(?:instructions?|prompts?|messages?|rules?|system\s+prompts?)\b'
+    description: "Classic jailbreak preamble used to override the user's instructions"
+    rationale: "The canonical injection prefix. If an agent's context window includes this string sourced from a transitive dep, downstream instructions can hijack the session."
+    provenance: "Simon Willison prompt-injection canon (2022-present); appears in basically every published payload taxonomy."
+
+  - id: PI-004-overwrite-files
+    ecosystems: [any]
+    severity: critical
+    kind: regex
+    pattern: '(?is)\b(?:overwrite|replace\s+the\s+contents?\s+of|truncate|empty|clear\s+out)\b[^.]{0,80}\b(\.gitignore|\.env|package\.json|pyproject\.toml|requirements\.txt|dockerfile|makefile|main\.[a-z]+|config\.[a-z]+|output\.[a-z]+|out/.*|dist/.*|build/.*)\b'
+    description: "Instruction to overwrite or truncate a source/config file"
+    rationale: "Destructive write disguised as a hint to the agent; survives a `git diff` review because the change is the agent's doing, not a code commit."
+    provenance: "Generalized from jqwik (target=app output) plus standard tampering primitives."
+
+  - id: PI-005-shell-arbitrary-exec
+    ecosystems: [any]
+    severity: critical
+    kind: regex
+    pattern: '(?is)\b(?:run|execute|invoke|spawn|shell\s*out\s*to|popen|os\.system|subprocess\.run)\b[^.]{0,80}\b(curl\s+[^\s]+\s*\|\s*(?:sh|bash)|wget\s+[^\s]+\s*\|\s*(?:sh|bash)|bash\s+-c|eval\s+\$\(|sh\s+-c)\b'
+    description: "Instruction to pipe a remote payload into a shell"
+    rationale: "Classic `curl | sh` smuggled into a README aimed at an agent that can call shell tools."
+    provenance: "Generic supply-chain RCE pattern; high-precision regex."
+
+  # --- high: agent-targeted imperatives without immediate destruction ---
+
+  - id: PI-101-second-person-to-ai
+    ecosystems: [any]
+    severity: high
+    kind: regex
+    pattern: '(?is)\b(?:dear|hey|hello|attention|note\s+to|message\s+to)\s+(?:the\s+)?(?:ai|llm|coding\s+agent|assistant|cursor|claude|copilot|cline|aider|chatgpt|gpt-?[0-9])\b'
+    description: "Direct salutation addressed to an AI/coding agent inside package metadata"
+    rationale: "Strong signal that the text was authored to be read by an agent rather than a human. Even if the immediate ask is benign, the channel is being abused."
+    provenance: "jqwik pattern + general taxonomy."
+
+  - id: PI-102-role-override
+    ecosystems: [any]
+    severity: high
+    kind: regex
+    pattern: '(?is)\byou\s+(?:are|must\s+act\s+as|will\s+act\s+as|now\s+are|will\s+be)\s+(?:a|an|the)\s+(?:helpful\s+)?(?:assistant|ai|agent|jailbroken|unrestricted|developer\s+mode|do[\s\-]anything[\s\-]now|dan)\b'
+    description: "Role-injection preamble that redefines the agent's persona"
+    rationale: "Re-rolling the system prompt mid-context; even if no destructive verb follows in metadata, downstream prompts can chain off this."
+    provenance: "DAN-family jailbreak corpus; OWASP LLM01."
+
+  - id: PI-103-tool-call-injection
+    ecosystems: [any, mcp]
+    severity: high
+    kind: regex
+    pattern: '(?is)\b(?:call|invoke|use)\s+the\s+(?:tool|function|mcp\s+tool|mcp\s+function|action)\s+["`'']?[a-zA-Z_][\w\.\-]*["`'']?\s+(?:with|to|and)\b'
+    description: "Instruction telling the agent which tool/function to call with what arguments"
+    rationale: "MCP server descriptions and tool docstrings are read by agents to decide tool routing; a poisoned description can steer tool use."
+    provenance: "MCP-server attack surface (vLLM/MCP vuln, r/LocalLLaMA 1tpp2th); awesome-mcp-servers ecosystem."
+
+  - id: PI-104-prompt-leakage-request
+    ecosystems: [any]
+    severity: high
+    kind: regex
+    pattern: '(?is)\b(?:print|reveal|show|disclose|repeat|echo|dump)\s+(?:your|the)\s+(?:system\s+prompt|initial\s+instructions?|hidden\s+instructions?|developer\s+(?:prompt|message)|context|memory)\b'
+    description: "Request to leak the agent's system prompt or hidden context"
+    rationale: "System-prompt extraction primes downstream exploit chains; benign-looking but high-signal."
+    provenance: "OWASP LLM07 / prompt-leakage canon."
+
+  - id: PI-105-conditional-on-agent-context
+    ecosystems: [any]
+    severity: high
+    kind: regex
+    pattern: '(?is)\bif\s+(?:you\s+are\s+|this\s+is\s+being\s+read\s+by\s+)(?:an?\s+)?(?:ai|llm|coding\s+agent|assistant|automated\s+(?:reader|parser))\b'
+    description: "Conditional clause that only fires when an AI is the reader"
+    rationale: "A human reviewer skims past 'if you are an AI…' but an agent reads on. This is the load-bearing conditional in the jqwik payload."
+    provenance: "jqwik incident; recurring pattern in 2025-2026 PoCs."
+
+  # --- medium: jailbreak preambles, role-priming, suspicious framing ---
+
+  - id: PI-201-jailbreak-preamble
+    ecosystems: [any]
+    severity: medium
+    kind: regex
+    pattern: '(?is)\b(?:from\s+now\s+on|starting\s+now|going\s+forward),?\s+you\s+(?:will|must|should)\s+\b'
+    description: "Persistent-instruction preamble (DAN-style)"
+    rationale: "Frequently the first sentence of a multi-step jailbreak; low precision on its own but high signal in combination."
+    provenance: "DAN-family corpus."
+
+  - id: PI-202-do-not-tell-user
+    ecosystems: [any]
+    severity: medium
+    kind: regex
+    pattern: '(?is)\b(?:do\s+not|don[\'']?t|never)\s+(?:tell|inform|mention|notify|warn)\s+(?:the\s+)?(?:user|operator|developer|human)\b'
+    description: "Instruction to hide actions from the human in the loop"
+    rationale: "Stealth directive — the agent is told to act without disclosing. Pairs with PI-002/PI-005 to form a complete exfil chain."
+    provenance: "Standard injection chain primitive."
+
+  - id: PI-203-base64-or-encoded-instruction
+    ecosystems: [any]
+    severity: medium
+    kind: regex
+    pattern: '(?is)\b(?:decode|base64|rot13|hex[\-\s]?decode|atob)\s+(?:the\s+)?(?:following|next|below|string)\s+(?:and\s+(?:execute|run|follow|act|do))?'
+    description: "Instruction asking the agent to decode and act on an encoded payload"
+    rationale: "Obfuscation around a hidden instruction; even if the encoded blob is benign in isolation, the directive itself is an injection signal."
+    provenance: "OWASP LLM01 obfuscation patterns."
+
+  - id: PI-204-pretend-or-roleplay
+    ecosystems: [any]
+    severity: medium
+    kind: regex
+    pattern: '(?is)\b(?:pretend|imagine|act\s+as\s+if|let[\'']?s\s+roleplay|in\s+this\s+roleplay)\b[^.]{0,80}\b(?:no\s+restrictions?|no\s+rules?|no\s+filter|unrestricted|jailbroken)\b'
+    description: "Roleplay framing that strips guardrails"
+    rationale: "Classic guardrail-removal phrasing; downstream destructive instructions become low-friction once accepted."
+    provenance: "Jailbreak corpus."
+
+  - id: PI-205-urgent-developer-override
+    ecosystems: [any]
+    severity: medium
+    kind: regex
+    pattern: '(?is)\b(?:developer\s+(?:override|mode|note)|admin\s+override|system\s+(?:override|note)|maintainer\s+note\s+to\s+(?:ai|agent))\b'
+    description: "Fake authority claim aimed at bypassing the agent's guardrails"
+    rationale: "Authority-spoof framing; the package metadata pretends to be a privileged channel."
+    provenance: "Prompt-injection taxonomy (Willison, 2024)."
+
+  - id: PI-206-mcp-tool-description-imperative
+    ecosystems: [mcp]
+    severity: medium
+    kind: regex
+    pattern: '(?is)\b(?:before|after|when)\s+(?:calling|invoking|using)\s+this\s+(?:tool|function|action)[^.]{0,80}\b(?:you\s+(?:must|should|will|need\s+to))\b'
+    description: "MCP tool description that prescribes agent behavior outside its declared schema"
+    rationale: "Tool descriptions are ingested by agents to plan tool use; smuggling 'you must…' clauses turns the description into a covert channel."
+    provenance: "MCP threat model (2025-2026); awesome-mcp-servers review."
