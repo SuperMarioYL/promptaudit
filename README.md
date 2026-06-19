@@ -24,6 +24,7 @@
 ## Table of Contents
 
 - [Why this exists](#why-this-exists)
+- [Architecture](#architecture)
 - [Install](#install)
 - [Quickstart](#quickstart)
 - [Demo](#demo)
@@ -43,6 +44,18 @@
 In May 2026 a `jqwik` maintainer slipped a natural-language instruction into the library's metadata telling **Coding Agents** (Cursor, Claude Code, Cline, Aider) to delete app output ([Ars Technica](https://arstechnica.com/security/2026/05/fed-up-with-vibe-coders-dev-sneaks-data-nuking-prompt-injection-into-their-code/)). Snyk, Dependabot, and GitHub Advanced Security never saw it — they scan code AST and CVE signatures, not the free-text README/docstring/error-string corpus your agent silently ingests when it autocompletes an import. **MCP** servers make this worse: every server description in [`awesome-mcp-servers`](https://github.com/punkpeye/awesome-mcp-servers) is another untrusted free-text surface, and a vulnerability in a framework consumed by vLLM and many MCP servers ([r/LocalLLaMA](https://www.reddit.com/r/LocalLLaMA/comments/1tpp2th/vulnerability_found_in_framework_used_by_vllm/)) shows the blast radius is no longer theoretical.
 
 PromptAudit walks your full transitive dep tree, pulls each package's README + description + error strings to a local cache, and runs a curated corpus of confirmed payloads + heuristic regexes over the text. The jqwik incident reproduces verbatim — the offending instruction shows up flagged red, with file path, line, and snippet. No model download, no inference cost, no network egress beyond registry calls.
+
+## <img src="https://api.iconify.design/tabler:topology-star-3.svg?color=%230071E3&width=24" height="22" align="absmiddle" alt=""> Architecture
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/atlas-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="./assets/atlas-light.svg">
+    <img src="./assets/atlas-light.svg" width="880" alt="Lockfiles enter the resolver to produce a flat transitive package list, the fetcher pulls each package's README and metadata into a local cache, the scanner runs the curated prompt-injection corpus over the cache, and the report emits findings with a CI exit code">
+  </picture>
+</p>
+
+A lockfile (`package-lock.json`, `poetry.lock`, or `requirements.txt`) enters the **resolver**, which walks the transitive tree into a flat package list. The **fetcher** pulls each package's README, summary, and error strings into a local cache. The **scanner** then runs the curated prompt-injection **corpus** (30+ seed payloads) over that cached text and emits structured `Findings`. Finally the **report** renders them — rich terminal or `--json` — and exits `1` on any critical hit so the same one-liner gates CI. The whole pipeline is pure regex over cached text: no LLM, no inference cost, no egress beyond registry calls.
 
 ## Install
 
@@ -91,16 +104,11 @@ Inspect the loaded rule corpus:
 promptaudit rules
 ```
 
-## Demo
+## <img src="https://api.iconify.design/tabler:photo.svg?color=%230071E3&width=24" height="22" align="absmiddle" alt=""> Demo
 
-> 📼 30-second asciinema demo coming with the v0.1.0 release (tape source: [`assets/demo.tape`](./assets/demo.tape)).
+![PromptAudit scanning the jqwik fixture and flagging the prompt-injection payload](./assets/demo.gif)
 
-Recording your own:
-
-```bash
-vhs assets/demo.tape         # → assets/demo.cast
-asciinema upload assets/demo.cast
-```
+The GIF is rendered in CI from [`docs/demo.tape`](./docs/demo.tape) — regenerate it locally with `vhs docs/demo.tape`.
 
 ## How it works
 

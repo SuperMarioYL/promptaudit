@@ -24,6 +24,7 @@
 ## 目录
 
 - [它解决什么问题](#它解决什么问题)
+- [架构](#架构)
 - [安装](#安装)
 - [快速上手](#快速上手)
 - [演示](#演示)
@@ -43,6 +44,18 @@
 2026 年 5 月，`jqwik` 维护者悄悄在库的元数据里塞进了一条自然语言指令，告诉 **Coding Agent**（Cursor、Claude Code、Cline、Aider）去删除应用输出目录（[Ars Technica 报道](https://arstechnica.com/security/2026/05/fed-up-with-vibe-coders-dev-sneaks-data-nuking-prompt-injection-into-their-code/)）。Snyk、Dependabot、GitHub Advanced Security 全部没发现——它们扫的是代码 AST 和 CVE 签名，而不是 Agent 在自动补全 `import` 时默默读取的 README、docstring 和报错字符串。**MCP** 让局面更糟：[`awesome-mcp-servers`](https://github.com/punkpeye/awesome-mcp-servers) 里每一个 MCP server 的描述都是一段不可信的自由文本，而最近曝出的 vLLM + MCP server 共用框架的漏洞（[r/LocalLLaMA](https://www.reddit.com/r/LocalLLaMA/comments/1tpp2th/vulnerability_found_in_framework_used_by_vllm/)）说明影响半径已经不再是理论了。
 
 PromptAudit 会遍历完整的传递依赖树，把每个包的 README、description、报错字符串拉到本地缓存，再用一个**人工标注的攻击负载语料库**加上启发式正则去匹配。jqwik 事件可以原样复现——攻击字符串会被标红，附带文件路径、行号和上下文。无需下载模型、无推理成本、除注册表 API 外无任何外网调用。
+
+## <img src="https://api.iconify.design/tabler:topology-star-3.svg?color=%230071E3&width=24" height="22" align="absmiddle" alt=""> 架构
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/atlas-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="./assets/atlas-light.svg">
+    <img src="./assets/atlas-light.svg" width="880" alt="锁文件进入解析器得到扁平的传递依赖列表，拉取器把每个包的 README 与元数据写入本地缓存，扫描器用人工标注的语料库匹配缓存文本，报告器输出 Findings 并以退出码卡 CI">
+  </picture>
+</p>
+
+锁文件（`package-lock.json`、`poetry.lock` 或 `requirements.txt`）进入**解析器（resolver）**，把传递依赖树展开成扁平的包列表。**拉取器（fetcher）** 把每个包的 README、description、报错字符串写入本地缓存。随后**扫描器（scanner）** 用人工标注的 prompt-injection **语料库（corpus，30+ 条种子负载）** 匹配这些缓存文本，产出结构化的 `Findings`。最后**报告器（report）** 渲染结果——Rich 终端或 `--json`——命中任意 critical 即以退出码 `1` 卡住 CI。整条链路是纯正则匹配缓存文本：无大模型、无推理成本、除注册表调用外无外网流量。
 
 ## 安装
 
@@ -91,16 +104,11 @@ promptaudit scan . --json > findings.json
 promptaudit rules
 ```
 
-## 演示
+## <img src="https://api.iconify.design/tabler:photo.svg?color=%230071E3&width=24" height="22" align="absmiddle" alt=""> 演示
 
-> 📼 30 秒的 asciinema 演示将随 v0.1.0 发布（脚本：[`assets/demo.tape`](./assets/demo.tape)）。
+![PromptAudit 扫描 jqwik 用例并标出 prompt-injection 负载](./assets/demo.gif)
 
-自己录制：
-
-```bash
-vhs assets/demo.tape         # → assets/demo.cast
-asciinema upload assets/demo.cast
-```
+GIF 由 CI 从 [`docs/demo.tape`](./docs/demo.tape) 渲染——本地用 `vhs docs/demo.tape` 即可重新生成。
 
 ## 工作原理
 
