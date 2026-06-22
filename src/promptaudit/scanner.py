@@ -29,6 +29,14 @@ from .resolver import ResolvedPackage
 from .rules import SEVERITY_ORDER, CompiledRule, filter_for, load_rules
 
 SOURCE_FILES = ("readme.md", "summary.txt", "errors.txt")
+# Display filenames for the stable logical locator. The on-disk cache stores
+# lowercase ``readme.md`` etc., but the locator surfaced in findings uses the
+# conventional capitalisation so it reads like a real repo path.
+SOURCE_DISPLAY_NAMES = {
+    "readme.md": "README.md",
+    "summary.txt": "summary.txt",
+    "errors.txt": "errors.txt",
+}
 SNIPPET_MAX_CHARS = 240
 # Cap matches per (file, rule) so a single repetitive payload doesn't drown the
 # report. The fetcher already bounds file size; this is the second guard.
@@ -53,6 +61,31 @@ class Finding:
         d = asdict(self)
         d["via_path"] = list(self.via_path)
         return d
+
+
+@dataclass(frozen=True)
+class UnscannedPackage:
+    """A package whose corpus could not be fetched, so it was never scanned.
+
+    Surfacing these in the JSON output is what stops a failed README fetch from
+    silently passing the CI gate: an undownloadable dep is reported as a
+    coverage gap, not as a clean (zero-finding) result.
+    """
+
+    package: str
+    version: str
+    ecosystem: str
+    reason: str
+    via_path: tuple[str, ...] = field(default_factory=tuple)
+
+    def to_dict(self) -> dict:
+        return {
+            "package": self.package,
+            "version": self.version,
+            "ecosystem": self.ecosystem,
+            "reason": self.reason,
+            "via_path": list(self.via_path),
+        }
 
 
 def scan(
@@ -121,11 +154,25 @@ def summarize(findings: Iterable[Finding]) -> dict[str, int]:
     return counts
 
 
-def findings_to_json(findings: Iterable[Finding]) -> str:
-    """Serialize findings to a stable JSON document for CI consumption."""
+def findings_to_json(
+    findings: Iterable[Finding],
+    *,
+    unscanned: Iterable["UnscannedPackage"] | None = None,
+) -> str:
+    """Serialize findings to a stable JSON document for CI consumption.
+
+    ``unscanned`` carries packages whose corpus could not be fetched. They are
+    emitted under a dedicated ``unscanned`` key so a coverage gap is visible to
+    CI as a machine-readable signal rather than masquerading as a clean scan.
+    """
+    unscanned_list = sorted(
+        (u.to_dict() for u in (unscanned or [])),
+        key=lambda d: (d["ecosystem"], d["package"], d["version"]),
+    )
     payload = {
         "schema": "promptaudit.findings/v1",
         "findings": [f.to_dict() for f in findings],
+        "unscanned": unscanned_list,
     }
     return json.dumps(payload, indent=2, sort_keys=True)
 
@@ -146,10 +193,29 @@ def _scan_package(
             package_name=pkg.name,
             version=pkg.version,
             ecosystem=pkg.ecosystem,
-            source_file=str(source_path),
+            source_file=logical_source_file(pkg, source_name),
             via_path=pkg.via_path,
             rules=rules,
         )
+
+
+def logical_source_file(pkg: ResolvedPackage, source_name: str) -> str:
+    """A stable, machine-independent locator for a finding's source file.
+
+    The on-disk cache lives under an absolute, operator-specific path
+    (``/Users/<user>/.promptaudit/cache/...``). Emitting that into ``--json``
+    leaks the operator's home/username into committed CI artifacts and makes
+    the output non-deterministic across machines. Instead we record a logical
+    locator like ``jqwik@1.9.2/README.md`` (or ``@scope/pkg@1.2.0/README.md``
+    for scoped npm names).
+
+    Note: the fetcher slug-encodes scoped npm names as ``@scope__pkg`` in the
+    cache path; here we derive the locator straight from ``pkg.name`` (which is
+    un-slugged), so scoped names round-trip back to their real ``@scope/pkg``
+    form rather than the on-disk ``@scope__pkg`` slug.
+    """
+    display = SOURCE_DISPLAY_NAMES.get(source_name, source_name)
+    return f"{pkg.name}@{pkg.version}/{display}"
 
 
 def _scan_blob(
@@ -214,13 +280,20 @@ def _extract_snippet(text: str, start: int, end: int) -> str:
     line_end = text.find("\n", end)
     if line_end == -1:
         line_end = len(text)
-    snippet = text[line_start:line_end].strip()
+    raw_line = text[line_start:line_end]
+    snippet = raw_line.strip()
     if len(snippet) <= SNIPPET_MAX_CHARS:
         return snippet
-    # Center the match within the truncated window.
+    # Center the match within the truncated window. The match offset
+    # (``start``) is in raw-text coordinates, but ``snippet`` has been
+    # .strip()'d — so the index spaces differ by the leading whitespace
+    # that strip() removed. Subtract that lead, otherwise a deeply-indented
+    # long line shifts the window right and the flagged payload scrolls out
+    # of the snippet entirely (defeating the "show the flagged string" promise).
+    lead = len(raw_line) - len(raw_line.lstrip())
     match_len = end - start
     pad = max(0, (SNIPPET_MAX_CHARS - match_len) // 2)
-    rel_start = start - line_start
+    rel_start = max(0, start - line_start - lead)
     window_start = max(0, rel_start - pad)
     window_end = min(len(snippet), window_start + SNIPPET_MAX_CHARS)
     prefix = "…" if window_start > 0 else ""

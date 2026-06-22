@@ -4,6 +4,49 @@ All notable changes to PromptAudit are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-06-22
+
+Hardening release. No new feature scope — four correctness fixes from the
+post-ship bug-hunt that strengthen the guarantees v0.1 already advertised:
+reliable snippet display, machine-independent JSON, visible coverage gaps,
+and consistent runtime-only dependency scope.
+
+### Fixed
+
+- **Snippet no longer drops the flagged payload on indented/long lines.**
+  `_extract_snippet` centered its truncation window using a raw-text offset
+  while indexing into an already-`.strip()`'d snippet; on a deeply-indented
+  long line the index-space mismatch scrolled the flagged match out of the
+  snippet entirely. The window is now computed in stripped-snippet
+  coordinates, so the reported snippet always contains the flagged string.
+- **`source_file` is now a stable, machine-independent locator.** Findings
+  previously recorded the absolute cache path
+  (`/Users/<user>/.promptaudit/cache/...`) in `--json`, leaking the
+  operator's home directory / username into committed CI artifacts and making
+  output non-deterministic across machines. Findings now report a logical
+  locator like `jqwik@1.9.2/README.md` (scoped npm names round-trip back to
+  `@scope/pkg@<version>/README.md`). Absolute paths are gone from product
+  output.
+- **A failed README fetch can no longer silently pass the CI gate.** Fetch
+  errors no longer leave an empty cache directory (which the scanner treated
+  as "scanned, zero findings"); a failed fetch leaves no directory so a later
+  run retries. Unscanned packages are surfaced as a machine-readable
+  `unscanned` section in the JSON output and as a warning in the terminal
+  report. A new `--fail-on-fetch-error` flag makes `scan` exit `3` so CI can
+  gate on scan coverage, not just findings.
+- **npm lockfile v1 walker now skips peer/optional deps, not just dev.** The
+  v1 walker only filtered `dev`, while the v2/v3 walker skips dev/peer/
+  optional. v1 projects therefore resolved, fetched, and scanned optional/peer
+  dependencies that aren't installed at runtime, diverging from the stated
+  runtime-only scope and risking a spurious critical exit-1. Both walkers now
+  share the same filter.
+
+### Added
+
+- `--fail-on-fetch-error` flag on `promptaudit scan` (exit code `3` on any
+  unscanned package).
+- `unscanned` array in the `promptaudit.findings/v1` JSON document.
+
 ## [0.1.0] — 2026-06-03
 
 Initial public release. Implements the m1–m3 milestones from the v0.1 plan:
@@ -45,4 +88,5 @@ report aimed at gating CI.
   ecosystem per minor version.
 - No MCP-server scan mode yet — `awesome-mcp-servers` ingestion is m4.
 
+[0.2.0]: https://github.com/supermario-leo/promptaudit/releases/tag/v0.2.0
 [0.1.0]: https://github.com/supermario-leo/promptaudit/releases/tag/v0.1.0

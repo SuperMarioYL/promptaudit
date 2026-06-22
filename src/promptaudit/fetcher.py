@@ -104,17 +104,29 @@ def _fetch_one(
     if meta_path.exists() and not force:
         return FetchResult(pkg, target, (), "skipped", "cached")
 
-    target.mkdir(parents=True, exist_ok=True)
+    if pkg.ecosystem not in ("npm", "pypi"):
+        return FetchResult(pkg, target, (), "error", f"unknown ecosystem {pkg.ecosystem}")
+
+    # Fetch into a temp dir first; only promote to the real cache path on
+    # success. A failed fetch must NOT leave an empty cache dir behind — the
+    # scanner would then treat the package as "scanned, zero findings" and an
+    # undownloadable dependency would silently pass the CI gate (false negative
+    # on exactly the surface this tool exists to cover). Leaving no dir means a
+    # later run retries instead of trusting an empty directory.
+    staging = target.parent / f".{target.name}.tmp"
+    if staging.exists():
+        _rmtree(staging)
+    staging.mkdir(parents=True, exist_ok=True)
     try:
         if pkg.ecosystem == "npm":
-            sources = _fetch_npm(pkg, target, session)
-        elif pkg.ecosystem == "pypi":
-            sources = _fetch_pypi(pkg, target, session)
+            sources = _fetch_npm(pkg, staging, session)
         else:
-            return FetchResult(pkg, target, (), "error", f"unknown ecosystem {pkg.ecosystem}")
+            sources = _fetch_pypi(pkg, staging, session)
     except requests.RequestException as exc:
+        _rmtree(staging)
         return FetchResult(pkg, target, (), "error", f"network: {exc}")
     except Exception as exc:  # pragma: no cover — last-ditch isolation
+        _rmtree(staging)
         return FetchResult(pkg, target, (), "error", f"{type(exc).__name__}: {exc}")
 
     meta = {
@@ -125,8 +137,23 @@ def _fetch_one(
         "fetched_at": int(time.time()),
         "sources": sources,
     }
-    meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8")
+    (staging / "meta.json").write_text(
+        json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8"
+    )
+    # Promote staging → final atomically-ish. Remove a stale target first
+    # (e.g. a force-refetch over an existing entry).
+    if target.exists():
+        _rmtree(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staging.replace(target)
     return FetchResult(pkg, target, tuple(sources.keys()), "ok")
+
+
+def _rmtree(path: Path) -> None:
+    """Best-effort recursive delete (used to clean up staging / stale cache)."""
+    import shutil
+
+    shutil.rmtree(path, ignore_errors=True)
 
 
 # ---------- npm ----------------------------------------------------------------

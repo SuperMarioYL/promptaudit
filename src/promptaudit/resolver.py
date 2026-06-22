@@ -146,7 +146,11 @@ def _walk_lockfile_v1(
     deps: dict, parent_path: tuple[str, ...]
 ) -> Iterable[ResolvedPackage]:
     for name, meta in deps.items():
-        if meta.get("dev"):
+        if meta.get("dev") or meta.get("peer") or meta.get("optional"):
+            # v0.1 scope: runtime deps only — mirror _walk_lockfile_v2 so v1
+            # and v2 lockfiles share runtime-only semantics (don't resolve,
+            # fetch, or scan dev/peer/optional deps that aren't installed at
+            # runtime, which could otherwise trip a spurious critical exit-1).
             continue
         version = meta.get("version")
         if version:

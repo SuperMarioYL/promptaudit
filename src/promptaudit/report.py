@@ -22,7 +22,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from .scanner import Finding, findings_to_json, summarize
+from .scanner import Finding, UnscannedPackage, findings_to_json, summarize
 
 SEVERITY_STYLES = {
     "critical": "bold red",
@@ -37,9 +37,11 @@ def render_terminal(
     *,
     console: Console | None = None,
     scanned_packages: int | None = None,
+    unscanned: Iterable[UnscannedPackage] | None = None,
 ) -> None:
     """Print a human-readable report to the terminal."""
     findings = list(findings)
+    unscanned = list(unscanned or [])
     console = console or Console()
 
     if not findings:
@@ -58,6 +60,7 @@ def render_terminal(
                 box=SIMPLE_HEAVY,
             )
         )
+        _print_unscanned(console, unscanned)
         _print_footer(console)
         return
 
@@ -116,12 +119,43 @@ def render_terminal(
             )
         )
 
+    _print_unscanned(console, unscanned)
     _print_footer(console)
 
 
-def render_json(findings: Iterable[Finding]) -> str:
+def render_json(
+    findings: Iterable[Finding],
+    *,
+    unscanned: Iterable[UnscannedPackage] | None = None,
+) -> str:
     """JSON output for CI / machine consumers."""
-    return findings_to_json(findings)
+    return findings_to_json(findings, unscanned=unscanned)
+
+
+def _print_unscanned(
+    console: Console, unscanned: Iterable[UnscannedPackage]
+) -> None:
+    unscanned = list(unscanned)
+    if not unscanned:
+        return
+    console.print(
+        Text.assemble(
+            ("⚠ ", "bold yellow"),
+            (
+                f"{len(unscanned)} package(s) could NOT be fetched and were "
+                "left UNSCANNED — coverage gap, not a clean result:",
+                "bold yellow",
+            ),
+        )
+    )
+    for u in unscanned:
+        console.print(
+            Text.assemble(
+                ("  • ", "yellow"),
+                (f"{u.ecosystem}:{u.package}@{u.version}", "yellow"),
+                (f"  ({u.reason})", "dim"),
+            )
+        )
 
 
 def _print_footer(console: Console) -> None:

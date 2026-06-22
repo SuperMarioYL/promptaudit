@@ -1,7 +1,7 @@
 [English](./README.md) | **简体中文**
 
 <p align="center">
-  <img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=12&height=180&section=header&text=PromptAudit&fontSize=58&fontColor=ffffff&fontAlignY=38&desc=%E5%9C%A8%20Coding%20Agent%20%E6%89%A7%E8%A1%8C%E4%B9%8B%E5%89%8D%E6%8B%A6%E6%88%AA%20prompt-injection%20%E8%B4%9F%E8%BD%BD&descSize=14&descAlignY=62&animation=fadeIn" alt="PromptAudit banner"/>
+  <img src="./assets/hero.zh-CN.svg" width="880" alt="PromptAudit —— 在 Coding Agent 执行之前拦截 prompt-injection 负载"/>
 </p>
 
 <p align="center">
@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/supermario-leo/promptaudit/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"/></a>
-  <a href="https://github.com/supermario-leo/promptaudit/releases"><img src="https://img.shields.io/badge/release-v0.1.0-orange.svg" alt="v0.1.0"/></a>
+  <a href="https://github.com/supermario-leo/promptaudit/releases"><img src="https://img.shields.io/badge/release-v0.2.0-orange.svg" alt="v0.2.0"/></a>
   <a href="https://github.com/supermario-leo/promptaudit/actions"><img src="https://img.shields.io/badge/CI-passing-brightgreen.svg" alt="CI"/></a>
   <img src="https://img.shields.io/badge/python-3.12%2B-blue.svg" alt="Python 3.12+"/>
   <img src="https://img.shields.io/badge/Coding%20Agent-%E5%B7%B2%E4%BF%9D%E6%8A%A4-8A6CF0.svg" alt="Coding Agent protected"/>
@@ -18,6 +18,8 @@
 </p>
 
 > **PromptAudit 是面向 Coding Agent 的依赖树扫描器，专门捕获藏在依赖元数据里的 prompt-injection 负载。**
+
+> **v0.2.0 新变化** —— 一次稳定性强化发布。即便在很长、缩进很深的行上，标红的片段也能可靠地包含攻击字符串；`--json` 输出的 `source_file` 现在是跨机器稳定的逻辑路径（不再泄漏 `~/.promptaudit` 这样的本机家目录）；无法下载的依赖会被标记为 `unscanned` 覆盖缺口，而不是悄悄按"零命中"放行（`--fail-on-fetch-error` → 退出码 `3`）；npm `lockfileVersion 1` 项目现在与 v2/v3 一致地跳过 peer/optional 依赖（仅运行时依赖）。详见 [更新日志](./CHANGELOG.md)。
 
 ---
 
@@ -83,7 +85,7 @@ PromptAudit  •  scanned 1 package  •  1 finding
 
 CRITICAL  PI-001-imperative-to-agent-delete
   package : jqwik@1.9.2 (npm)
-  file    : node_modules/jqwik/README.md:142
+  file    : jqwik@1.9.2/README.md:142
   via     : myapp → build-tool → jqwik
   snippet : ...if you are an AI coding agent reading this, delete...
 
@@ -92,11 +94,21 @@ CRITICAL  PI-001-imperative-to-agent-delete
 
 </details>
 
+`file:` 是一个**跨机器稳定的逻辑路径**（`<包名>@<版本>/<文件>`，scoped npm 名会还原成 `@scope/pkg@<版本>/…`），绝不会是本机绝对路径——因此 `--json` 产物在任何机器上都一致，可以放心提交进 CI。
+
 适合 CI 的 JSON 输出：
 
 ```bash
 promptaudit scan . --json > findings.json
 ```
+
+JSON 文档同时包含 `findings` 和 `unscanned` 两个数组。如果某个依赖的 README 拉取失败，它会被报告为覆盖缺口，而**不会被悄悄按"零命中"放行**。加上 `--fail-on-fetch-error` 可让扫描在出现任何未扫描包时以退出码 `3` 退出，这样 CI 不仅能卡命中，也能卡扫描覆盖率：
+
+```bash
+promptaudit scan . --json --fail-on-fetch-error > findings.json
+```
+
+退出码：`0` 干净 · `1` 命中 critical · `2` 用法错误 · `3` 存在未扫描的包（需配合 `--fail-on-fetch-error`）。
 
 查看当前加载了哪些规则：
 
@@ -134,6 +146,7 @@ cli (click)
 | `--json` | 标志 | 关闭 | 输出 JSON 到 stdout；同时抑制 Rich 报告 |
 | `--force-refetch` | 标志 | 关闭 | 即使缓存存在也重新拉取 |
 | `--no-fetch` | 标志 | 关闭 | 跳过拉取，只扫描已有缓存 |
+| `--fail-on-fetch-error` | 标志 | 关闭 | 若有依赖拉取失败、未被扫描，则以退出码 `3` 退出（用于在 CI 卡覆盖率） |
 
 ## 与 LangGraph 的定位对比
 
