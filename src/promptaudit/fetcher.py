@@ -59,6 +59,17 @@ README_CANDIDATE_NAMES = (
 STRING_LITERAL_RE = re.compile(rb'["\']([\x20-\x7e]{40,400})["\']')
 
 
+class _VersionNotFound(Exception):
+    """The registry returned 404 for a package/version.
+
+    A yanked, unpublished, or wrongly-resolved version — itself a supply-chain
+    red flag. Kept distinct from ``requests.RequestException`` (a transient
+    transport failure) so ``_fetch_one`` can attribute the coverage gap to a
+    missing version rather than a network blip, and so the 404 path is not
+    silently promoted to a scanned-clean cache dir.
+    """
+
+
 @dataclass(frozen=True)
 class FetchResult:
     """Outcome of fetching a single package."""
@@ -122,12 +133,32 @@ def _fetch_one(
             sources = _fetch_npm(pkg, staging, session)
         else:
             sources = _fetch_pypi(pkg, staging, session)
+    except _VersionNotFound as exc:
+        # A 404 (yanked / unpublished / wrongly-resolved version) is a coverage
+        # failure, not a clean result — and a yanked version is itself a
+        # supply-chain red flag. Do NOT promote an empty cache dir: the scanner
+        # would otherwise see "dir exists, zero source files" and emit zero
+        # findings, silently passing the CI gate (the exact false-negative shape
+        # v0.2.0's RequestException fix targeted, but the 404 path slipped past
+        # it). Leaving no dir means a later run retries.
+        _rmtree(staging)
+        return FetchResult(pkg, target, (), "error", f"version_not_found: {exc}")
     except requests.RequestException as exc:
         _rmtree(staging)
         return FetchResult(pkg, target, (), "error", f"network: {exc}")
     except Exception as exc:  # pragma: no cover — last-ditch isolation
         _rmtree(staging)
         return FetchResult(pkg, target, (), "error", f"{type(exc).__name__}: {exc}")
+
+    # A fetch that returned zero source files (e.g. a manifest with no readme,
+    # description, or extractable error strings) is likewise a coverage failure:
+    # the scanner would emit zero findings for an empty cache dir and the dep
+    # would silently pass the gate. Don't promote an empty corpus to "ok".
+    if not sources:
+        _rmtree(staging)
+        return FetchResult(
+            pkg, target, (), "error", "empty_corpus: no readme/summary/error text"
+        )
 
     meta = {
         "name": pkg.name,
@@ -167,7 +198,7 @@ def _fetch_npm(
     url = f"{NPM_REGISTRY}/{pkg.name}/{pkg.version}"
     resp = session.get(url, timeout=HTTP_TIMEOUT)
     if resp.status_code == 404:
-        return sources
+        raise _VersionNotFound(f"{pkg.name}@{pkg.version} not on npm registry")
     resp.raise_for_status()
     manifest = resp.json()
 
@@ -239,7 +270,7 @@ def _fetch_pypi(
     url = f"{PYPI_REGISTRY}/{pkg.name}/{pkg.version}/json"
     resp = session.get(url, timeout=HTTP_TIMEOUT)
     if resp.status_code == 404:
-        return sources
+        raise _VersionNotFound(f"{pkg.name}@{pkg.version} not on PyPI")
     resp.raise_for_status()
     payload = resp.json()
     info = payload.get("info") or {}

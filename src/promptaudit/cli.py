@@ -23,7 +23,12 @@ from .fetcher import DEFAULT_CACHE_ROOT, fetch_all
 from .report import render_json, render_terminal
 from .resolver import ResolverError, resolve
 from .rules import SEVERITY_ORDER, load_rules
-from .scanner import UnscannedPackage, has_critical, scan
+from .scanner import (
+    UnscannedPackage,
+    has_critical,
+    packages_with_coverage,
+    scan,
+)
 
 EXIT_OK = 0
 EXIT_CRITICAL_FOUND = 1
@@ -83,6 +88,13 @@ def main() -> None:
         "left unscanned. Use in CI to gate on scan coverage, not just findings."
     ),
 )
+@click.option(
+    "-q",
+    "--quiet",
+    is_flag=True,
+    default=False,
+    help="Suppress non-essential output (e.g. the post-scan star nudge).",
+)
 def scan_cmd(
     project_root: Path,
     cache_root: Path | None,
@@ -91,6 +103,7 @@ def scan_cmd(
     force_refetch: bool,
     no_fetch: bool,
     fail_on_fetch_error: bool,
+    quiet: bool,
 ) -> None:
     """Resolve, fetch, and scan PROJECT_ROOT for prompt-injection payloads."""
     console = Console(stderr=as_json)  # keep stdout clean when emitting JSON
@@ -104,7 +117,11 @@ def scan_cmd(
         click.echo("promptaudit: no dependencies resolved — nothing to scan.", err=True)
         sys.exit(EXIT_OK)
 
-    unscanned: list[UnscannedPackage] = []
+    # Per-package fetch reasons (status="error" → coverage gap). Keyed by
+    # (ecosystem, name, version) so the coverage pass below can attach the
+    # fetch reason to the matching UnscannedPackage instead of a generic
+    # "no_cache" when surfacing cold-cache misses under --no-fetch.
+    fetch_reasons: dict[tuple[str, str, str], str] = {}
     if not no_fetch:
         console.print(
             f"[dim]Fetching corpus for {len(packages)} package(s)...[/dim]"
@@ -115,17 +132,34 @@ def scan_cmd(
                 f"[yellow]fetch warning:[/yellow] "
                 f"{r.package.ecosystem} {r.package.name}@{r.package.version}: {r.message}"
             )
-            unscanned.append(
-                UnscannedPackage(
-                    package=r.package.name,
-                    version=r.package.version,
-                    ecosystem=r.package.ecosystem,
-                    reason=r.message or "fetch_error",
-                    via_path=tuple(r.package.via_path),
-                )
-            )
+            fetch_reasons[
+                (r.package.ecosystem, r.package.name, r.package.version)
+            ] = r.message or "fetch_error"
 
     findings = scan(packages, cache_root=cache_root, corpus_path=corpus)
+
+    # Coverage: which resolved packages actually had cached source text to scan?
+    # A cold/partial cache under --no-fetch (or a total fetch failure) must not
+    # masquerade as a clean scan — surface the unscanned packages and report the
+    # actually-scanned count, not the resolved count.
+    scanned_pkgs, missing_pkgs = packages_with_coverage(
+        packages, cache_root=cache_root
+    )
+    unscanned: list[UnscannedPackage] = []
+    for pkg in missing_pkgs:
+        reason = fetch_reasons.get(
+            (pkg.ecosystem, pkg.name, pkg.version), "no_cache"
+        )
+        unscanned.append(
+            UnscannedPackage(
+                package=pkg.name,
+                version=pkg.version,
+                ecosystem=pkg.ecosystem,
+                reason=reason,
+                via_path=tuple(pkg.via_path),
+            )
+        )
+    actually_scanned = len(scanned_pkgs)
 
     if as_json:
         click.echo(render_json(findings, unscanned=unscanned))
@@ -133,10 +167,29 @@ def scan_cmd(
         render_terminal(
             findings,
             console=console,
-            scanned_packages=len(packages),
+            scanned_packages=actually_scanned,
             unscanned=unscanned,
         )
 
+    # Star CTA — one small line after a completed scan, suppressed for machine
+    # output (--json) or when quiet. pipx/PyPI installers bypass the GitHub page
+    # where starring happens, so this reconnects the install funnel to the star
+    # funnel (<500 stars is the project's survival metric).
+    if not as_json and not quiet:
+        console.print(
+            "[dim]★ star if PromptAudit caught a payload you'd have shipped: "
+            "https://github.com/SuperMarioYL/promptaudit[/dim]"
+        )
+
+    if actually_scanned == 0:
+        # Zero packages scanned = a coverage failure (cold cache under
+        # --no-fetch, or every fetch errored). Never exit 0 clean — a cold-cache
+        # --no-fetch run must not masquerade as a clean scan.
+        console.print(
+            "[bold red]✗ scanned 0 packages — run without --no-fetch to populate "
+            "the cache, or review the fetch warnings above.[/bold red]"
+        )
+        sys.exit(EXIT_FETCH_ERROR)
     if has_critical(findings):
         sys.exit(EXIT_CRITICAL_FOUND)
     if unscanned and fail_on_fetch_error:

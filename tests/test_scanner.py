@@ -27,6 +27,7 @@ from promptaudit.scanner import (  # noqa: E402
     findings_to_json,
     has_critical,
     logical_source_file,
+    packages_with_coverage,
     scan,
     scan_text,
     summarize,
@@ -297,6 +298,216 @@ def test_failed_fetch_is_surfaced_as_unscanned_not_silently_clean(
     assert len(decoded["unscanned"]) == 1
     assert decoded["unscanned"][0]["package"] == "evil-dep"
     assert "outage" in decoded["unscanned"][0]["reason"]
+
+
+# --------------------------------------------------------------------------
+# v0.3.0 regression tests
+# --------------------------------------------------------------------------
+
+
+class _FakeResponse:
+    """Minimal stand-in for requests.Response for fetcher monkeypatching."""
+
+    def __init__(self, *, status_code=200, payload=None):
+        self.status_code = status_code
+        self._payload = payload or {}
+
+    def json(self):
+        return self._payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            import requests
+
+            raise requests.HTTPError(f"{self.status_code}")
+
+
+def test_404_fetch_is_surfaced_as_unscanned_not_silently_clean(tmp_path, monkeypatch):
+    """fix-404-empty-corpus-silent-clean: a 404 (yanked / unpublished version)
+    must NOT be promoted to a scanned-clean cache dir. It is a coverage failure
+    (the dep itself is a supply-chain red flag) and must flow into UnscannedPackage.
+
+    This monkeypatches a real 404 response — NOT a requests.RequestException —
+    which is the exact path v0.2.0's fetch-error fix missed (it only covered
+    transport errors, not the 404-empty-sources path)."""
+    import requests
+
+    pkg = ResolvedPackage(
+        name="yanked-dep", version="9.9.9", ecosystem="npm", via_path=("app", "yanked-dep")
+    )
+    cache_root = tmp_path / "cache"
+
+    monkeypatch.setattr(
+        requests.Session,
+        "get",
+        lambda self, url, *a, **kw: _FakeResponse(status_code=404),
+    )
+
+    results = fetch_all([pkg], cache_root=cache_root)
+    assert len(results) == 1
+    assert results[0].status == "error"
+    assert "version_not_found" in results[0].message, results[0].message
+
+    # The cache dir must NOT exist — otherwise the scanner treats it as
+    # "scanned, zero findings" and the yanked dep silently passes the gate.
+    assert not cache_dir_for(pkg, cache_root).exists()
+    assert list(cache_root.glob("**/.*tmp")) == []
+
+    # Scanning the (absent) cache yields nothing — confirming the silent
+    # false-negative shape the CLI must now surface as an UnscannedPackage.
+    findings = scan([pkg], cache_root=cache_root)
+    assert findings == []
+
+    unscanned = [
+        UnscannedPackage(
+            package=r.package.name,
+            version=r.package.version,
+            ecosystem=r.package.ecosystem,
+            reason=r.message,
+            via_path=tuple(r.package.via_path),
+        )
+        for r in results
+        if r.status == "error"
+    ]
+    decoded = json.loads(findings_to_json(findings, unscanned=unscanned))
+    assert decoded["findings"] == []
+    assert len(decoded["unscanned"]) == 1
+    assert decoded["unscanned"][0]["package"] == "yanked-dep"
+    assert "version_not_found" in decoded["unscanned"][0]["reason"]
+
+
+def test_empty_corpus_fetch_is_surfaced_as_unscanned(tmp_path, monkeypatch):
+    """fix-404-empty-corpus-silent-clean (companion): a 200 that yields ZERO
+    source files (a manifest with no readme/description/strings) is also a
+    coverage failure — never promoted to a scanned-clean cache dir."""
+    import requests
+
+    pkg = ResolvedPackage(
+        name="bare-dep", version="1.2.3", ecosystem="npm", via_path=("app", "bare-dep")
+    )
+    cache_root = tmp_path / "cache"
+
+    # 200 OK, but the manifest carries no readme, no description, no tarball.
+    monkeypatch.setattr(
+        requests.Session,
+        "get",
+        lambda self, url, *a, **kw: _FakeResponse(
+            status_code=200, payload={"readme": "", "description": "", "dist": {}}
+        ),
+    )
+
+    results = fetch_all([pkg], cache_root=cache_root)
+    assert len(results) == 1
+    assert results[0].status == "error"
+    assert "empty_corpus" in results[0].message, results[0].message
+    assert not cache_dir_for(pkg, cache_root).exists()
+
+
+def test_tilde_pin_resolves_to_satisfying_version_not_latest(tmp_path, monkeypatch):
+    """fix-tilde-pin-resolves-to-latest: ``foo~=1.4.2`` (means ``>=1.4.2, ==1.4.*``)
+    must resolve to the highest version satisfying the compatible range — 1.4.5
+    — NOT the registry latest 2.0.0, which falls outside the range. Without the
+    fix, ``~=`` fell through _pin_from_specifier (returned None) and _walk_pypi
+    resolved to the registry latest, scanning the wrong version."""
+    import requests
+    from packaging.specifiers import SpecifierSet
+
+    from promptaudit.resolver import resolve
+
+    (tmp_path / "requirements.txt").write_text("foo~=1.4.2\n", encoding="utf-8")
+
+    def _fake_get(self, url, *a, **kw):
+        # /foo/<version>/json — version-specific info (used by _walk_pypi for
+        # the resolved version's requires_dist).
+        if url.endswith("/foo/1.4.5/json"):
+            return _FakeResponse(
+                status_code=200,
+                payload={"info": {"version": "1.4.5", "requires_dist": None}},
+            )
+        # /foo/json — releases list (used by _resolve_pypi_max_satisfying).
+        if url.endswith("/foo/json"):
+            return _FakeResponse(
+                status_code=200,
+                payload={"releases": {"1.4.0": [], "1.4.2": [], "1.4.5": [], "2.0.0": []}},
+            )
+        return _FakeResponse(status_code=404)
+
+    monkeypatch.setattr(requests.Session, "get", _fake_get)
+
+    pkgs = list(resolve(tmp_path))
+    foo = [p for p in pkgs if p.name == "foo"]
+    assert foo, "foo~=1.4.2 should have been resolved"
+    assert foo[0].version == "1.4.5", (
+        f"foo~=1.4.2 must resolve to the highest satisfying 1.4.x (1.4.5), not "
+        f"the registry latest 2.0.0; got {foo[0].version}"
+    )
+    # Sanity: the resolved version satisfies ~=1.4.2; 2.0.0 does not.
+    spec = SpecifierSet("~=1.4.2")
+    assert foo[0].version in spec
+    assert "2.0.0" not in spec
+
+
+def test_packages_with_coverage_flags_cold_cache(tmp_path):
+    """fix-no-fetch-cold-cache-false-clean (unit): on a cold cache every resolved
+    package is 'missing' (no source files) — the signal the CLI uses to surface
+    UnscannedPackage under --no-fetch and avoid a false-clean exit."""
+    pkg = ResolvedPackage(name="cold-dep", version="1.0.0", ecosystem="npm")
+    cache_root = tmp_path / "empty-cache"  # cold — dir doesn't exist
+    scanned, missing = packages_with_coverage([pkg], cache_root=cache_root)
+    assert scanned == []
+    assert [m.name for m in missing] == ["cold-dep"]
+
+    # And a warm cache (source file present) is correctly counted as scanned.
+    warm_pkg = ResolvedPackage(name="warm-dep", version="2.0.0", ecosystem="npm")
+    warm_dir = cache_dir_for(warm_pkg, cache_root)
+    warm_dir.mkdir(parents=True)
+    (warm_dir / "readme.md").write_text("hello", encoding="utf-8")
+    scanned, missing = packages_with_coverage([pkg, warm_pkg], cache_root=cache_root)
+    assert [s.name for s in scanned] == ["warm-dep"]
+    assert [m.name for m in missing] == ["cold-dep"]
+
+
+def test_cold_cache_no_fetch_does_not_report_clean(tmp_path):
+    """fix-no-fetch-cold-cache-false-clean (end-to-end): ``scan . --no-fetch`` on
+    a cold cache must NOT exit 0 / print a clean bill — it scanned zero packages,
+    a coverage failure surfaced as an unscanned dep + exit 3. An npm lockfile
+    resolves locally (no network) so resolve() returns a package without any
+    registry call; the cold cache then guarantees zero scanned under --no-fetch."""
+    from click.testing import CliRunner
+
+    from promptaudit.cli import main
+
+    (tmp_path / "package-lock.json").write_text(
+        json.dumps(
+            {
+                "name": "myapp",
+                "lockfileVersion": 2,
+                "packages": {"node_modules/cold-dep": {"version": "1.0.0"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    cache_root = tmp_path / "empty-cache"  # cold — nothing fetched
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["scan", str(tmp_path), "--no-fetch", "--cache-root", str(cache_root)],
+    )
+
+    # The hard guarantee: a zero-scanned run must NOT exit 0 (clean masquerade).
+    assert result.exit_code == 3, (
+        "a cold-cache --no-fetch run scanned zero packages and must exit 3 "
+        f"(coverage failure), not 0; got exit {result.exit_code}\n{result.output}"
+    )
+    # It must report the coverage gap, not a clean bill of health.
+    assert "scanned 0" in result.output.lower(), (
+        f"expected a zero-coverage report, not a clean bill:\n{result.output}"
+    )
+    # The cold dep is surfaced as an unscanned coverage gap, not silently clean.
+    assert "cold-dep" in result.output, (
+        f"the cold dep must be surfaced as unscanned:\n{result.output}"
+    )
 
 
 def test_npm_lockfile_v1_skips_optional_and_peer_deps(tmp_path):

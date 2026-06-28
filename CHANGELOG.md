@@ -4,6 +4,55 @@ All notable changes to PromptAudit are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-06-28
+
+Fix + growth release. Post-ship signal stayed thin (0 issues / 0 PRs / 0 forks,
+stars 0→1 over 14 days), so v0.3.0 scope comes from the bug-hunt
+false-negative findings plus the measured install→star funnel gap, not user
+feature requests.
+
+### Fixed
+
+- **A 404 / yanked-version fetch is no longer silently scored clean.** A 404
+  (yanked, unpublished, or wrongly-resolved version — itself a supply-chain
+  red flag) returned an empty sources dict and was promoted to `status=ok`,
+  so the scanner found no source files, emitted zero findings, and the dep
+  passed the CI gate at exit 0 with no machine-readable signal. A 404 (or any
+  fetch yielding zero source files) is now a coverage failure —
+  `status=error` with reason `version_not_found` / `empty_corpus` — and the
+  empty cache dir is not promoted, so it flows into the existing `unscanned`
+  plumbing and the `--fail-on-fetch-error` gate. Extends v0.2.0's fetch-error
+  fix, which only covered `requests.RequestException` (total network failure),
+  not the 404-empty-sources path.
+- **`~=1.4.2` compatible-release pins now resolve to a satisfying version.**
+  `_pin_from_specifier` only returned a concrete version for `==` / `===`;
+  `~=` returned `None` and `_walk_pypi` resolved to the registry LATEST —
+  possibly outside the compatible range (e.g. `2.0.0` for `~=1.4.2`) — so the
+  scanner audited the wrong version. `~=` is now resolved to the highest PyPI
+  release satisfying the full specifier via the `packaging` releases-list
+  lookup, matching what `pip install` would pick. The
+  `_resolve_requirements_txt` docstring (which wrongly claimed `~=` was
+  treated as resolved) is corrected.
+- **`scan . --no-fetch` on a cold cache no longer exits 0 clean.** `scan()`
+  silently skipped any package whose cache dir was absent, and the CLI only
+  populated `unscanned` inside the fetch path, so a cold/partial cache under
+  `--no-fetch` printed "Scanned N packages, no payloads" (the resolved count)
+  and exited 0 having scanned zero. Coverage is now tracked explicitly:
+  packages missing from the cache are surfaced as `UnscannedPackage`
+  (reason `no_cache`) even under `--no-fetch`, the terminal panel reports the
+  actually-scanned count, and a zero-scanned run exits `3` (a distinct yellow
+  coverage panel replaces the misleading green "no payloads found").
+
+### Added
+
+- One-line star CTA after a completed scan ("★ star if PromptAudit caught a
+  payload you'd have shipped"), reconnecting the install funnel (pipx/PyPI
+  installers bypass the GitHub starring page) to the star funnel. Suppressed
+  under `--json` and the new `--quiet` (`-q`) flag so machine output stays
+  clean. The same CTA appears in the README header near the `pipx install`
+  line.
+- `-q` / `--quiet` flag on `promptaudit scan`.
+
 ## [0.2.0] — 2026-06-22
 
 Hardening release. No new feature scope — four correctness fixes from the
@@ -88,5 +137,6 @@ report aimed at gating CI.
   ecosystem per minor version.
 - No MCP-server scan mode yet — `awesome-mcp-servers` ingestion is m4.
 
-[0.2.0]: https://github.com/supermario-leo/promptaudit/releases/tag/v0.2.0
-[0.1.0]: https://github.com/supermario-leo/promptaudit/releases/tag/v0.1.0
+[0.3.0]: https://github.com/SuperMarioYL/promptaudit/releases/tag/v0.3.0
+[0.2.0]: https://github.com/SuperMarioYL/promptaudit/releases/tag/v0.2.0
+[0.1.0]: https://github.com/SuperMarioYL/promptaudit/releases/tag/v0.1.0

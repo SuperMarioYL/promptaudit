@@ -25,7 +25,9 @@ from typing import Iterable
 import requests
 from packaging.markers import Marker
 from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
 from packaging.utils import canonicalize_name
+from packaging.version import Version
 
 NPM_REGISTRY = "https://registry.npmjs.org"
 PYPI_REGISTRY = "https://pypi.org/pypi"
@@ -266,9 +268,14 @@ def _resolve_poetry_lock(lockfile: Path) -> Iterable[ResolvedPackage]:
 def _resolve_requirements_txt(req_file: Path) -> Iterable[ResolvedPackage]:
     """Parse pinned ``requirements.txt`` entries and walk PyPI transitively.
 
-    Only ``name==version`` and ``name~=version`` lines are treated as resolved.
-    Anything looser is sent through the PyPI walk to pick the latest.
+    ``name==version`` and ``name===version`` are exact pins (returned as-is).
+    ``name~=version`` is a compatible-release pin resolved to the highest PyPI
+    release satisfying the full specifier (so we audit the version a real
+    install picks, not the registry latest). Anything looser (``>=``, ``<``,
+    ranges, wildcards, bare names) is left unpinned and sent through the PyPI
+    walk to resolve to the latest release.
     """
+    session = _http_session()
     direct: list[tuple[str, str | None]] = []
     for raw in req_file.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
@@ -282,10 +289,10 @@ def _resolve_requirements_txt(req_file: Path) -> Iterable[ResolvedPackage]:
             req = Requirement(line)
         except Exception:
             continue
-        version = _pin_from_specifier(req)
+        version = _pin_from_specifier(req, session)
         direct.append((canonicalize_name(req.name), version))
 
-    yield from _walk_pypi(direct, root_name="<root>")
+    yield from _walk_pypi(direct, root_name="<root>", session=session)
 
 
 def _pyproject_has_project_deps(pyproject: Path) -> bool:
@@ -305,28 +312,84 @@ def _resolve_pyproject_project_deps(pyproject: Path) -> Iterable[ResolvedPackage
     with pyproject.open("rb") as fh:
         data = tomllib.load(fh)
     deps = data.get("project", {}).get("dependencies", []) or []
+    session = _http_session()
     direct: list[tuple[str, str | None]] = []
     for raw in deps:
         try:
             req = Requirement(raw)
         except Exception:
             continue
-        direct.append((canonicalize_name(req.name), _pin_from_specifier(req)))
-    yield from _walk_pypi(direct, root_name="<root>")
+        direct.append((canonicalize_name(req.name), _pin_from_specifier(req, session)))
+    yield from _walk_pypi(direct, root_name="<root>", session=session)
 
 
-def _pin_from_specifier(req: Requirement) -> str | None:
-    """Return a concrete version iff the specifier is an exact pin (``==`` / ``===``)."""
+def _pin_from_specifier(
+    req: Requirement, session: requests.Session | None = None
+) -> str | None:
+    """Return a concrete version for an exact (``==``/``===``) or compatible-
+    release (``~=``) pin; ``None`` for anything looser.
+
+    For ``==``/``===`` the specifier already names the version. For ``~=`` (e.g.
+    ``~=1.4.2`` means ``>=1.4.2, ==1.4.*``) we resolve the highest version from
+    the PyPI releases list that satisfies the FULL specifier — so we audit the
+    version a real ``pip install`` would resolve to, not the registry latest,
+    which may fall outside the compatible range (e.g. ``2.0.0`` for ``~=1.4.2``).
+    Looser specifiers (``>=``, ``<``, ranges, wildcards, bare names) return
+    ``None`` and fall through to the PyPI walk's latest-resolution path.
+    """
+    has_tilde = False
     for spec in req.specifier:
         if spec.operator in ("==", "==="):
             return spec.version
+        if spec.operator == "~=":
+            has_tilde = True
+    if has_tilde and session is not None:
+        return _resolve_pypi_max_satisfying(session, req.name, req.specifier)
     return None
 
 
+def _resolve_pypi_max_satisfying(
+    session: requests.Session, name: str, specifier: SpecifierSet
+) -> str | None:
+    """Highest PyPI release version satisfying ``specifier`` (``None`` if none / unreachable).
+
+    Mirrors what ``pip install`` picks for a ``~=`` / range specifier: the newest
+    non-prerelease release inside the constraint. Used so the scanner audits the
+    version a real install resolves to, instead of the registry latest (which
+    may violate the specifier — the core "audit the version you actually
+    install" promise).
+    """
+    try:
+        resp = session.get(f"{PYPI_REGISTRY}/{name}/json", timeout=HTTP_TIMEOUT)
+        if resp.status_code != 200:
+            return None
+        releases = (resp.json().get("releases") or {})
+    except requests.RequestException:
+        return None
+
+    candidates: list[Version] = []
+    for ver_str in releases:
+        try:
+            ver = Version(ver_str)
+        except Exception:  # invalid / non-pep440 release tag
+            continue
+        # SpecifierSet.__contains__ excludes prereleases unless the specifier
+        # itself references one — matching pip's default resolution.
+        if ver in specifier:
+            candidates.append(ver)
+    if not candidates:
+        return None
+    return str(max(candidates))
+
+
 def _walk_pypi(
-    direct: list[tuple[str, str | None]], root_name: str
+    direct: list[tuple[str, str | None]],
+    root_name: str,
+    *,
+    session: requests.Session | None = None,
 ) -> Iterable[ResolvedPackage]:
-    session = _http_session()
+    if session is None:
+        session = _http_session()
     visited: set[tuple[str, str]] = set()
     queue: list[tuple[str, str | None, tuple[str, ...]]] = [
         (name, version, (root_name,)) for name, version in direct
@@ -363,7 +426,7 @@ def _walk_pypi(
             if req.marker and not _marker_applies(req.marker):
                 continue
             sub_name = canonicalize_name(req.name)
-            sub_version = _pin_from_specifier(req)
+            sub_version = _pin_from_specifier(req, session)
             queue.append((sub_name, sub_version, (*via, name)))
 
 

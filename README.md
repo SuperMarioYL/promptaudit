@@ -9,9 +9,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/supermario-leo/promptaudit/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"/></a>
-  <a href="https://github.com/supermario-leo/promptaudit/releases"><img src="https://img.shields.io/badge/release-v0.2.0-orange.svg" alt="v0.2.0"/></a>
-  <a href="https://github.com/supermario-leo/promptaudit/actions"><img src="https://img.shields.io/badge/CI-passing-brightgreen.svg" alt="CI"/></a>
+  <a href="https://github.com/SuperMarioYL/promptaudit/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"/></a>
+  <a href="https://github.com/SuperMarioYL/promptaudit/releases"><img src="https://img.shields.io/github/v/release/SuperMarioYL/promptaudit" alt="latest release"/></a>
+  <a href="https://github.com/SuperMarioYL/promptaudit/actions"><img src="https://img.shields.io/badge/CI-passing-brightgreen.svg" alt="CI"/></a>
   <img src="https://img.shields.io/badge/python-3.12%2B-blue.svg" alt="Python 3.12+"/>
   <img src="https://img.shields.io/badge/Coding%20Agent-protected-8A6CF0.svg" alt="Coding Agent protected"/>
   <img src="https://img.shields.io/badge/MCP--ready-yes-7C3AED.svg" alt="MCP-ready"/>
@@ -19,7 +19,7 @@
 
 > **PromptAudit is the dep-tree scanner that catches prompt-injection payloads aimed at your Coding Agent.**
 
-> **What's new in v0.2.0** — a hardening release. Flagged snippets now reliably show the offending string even on long, deeply-indented lines; `--json` reports a stable machine-independent `source_file` (no more leaked `~/.promptaudit` home paths); an undownloadable dependency is surfaced as an `unscanned` coverage gap instead of silently passing the gate (`--fail-on-fetch-error` → exit `3`); and npm `lockfileVersion 1` projects now skip peer/optional deps consistently with v2/v3 (runtime-only scope). See the [changelog](./CHANGELOG.md).
+> **What's new in v0.3.0** — a fix + growth release. A 404 / yanked-version fetch (itself a supply-chain red flag) is now surfaced as an `unscanned` coverage gap instead of silently scoring the dep clean; `~=1.4.2` compatible-release pins in `requirements.txt` now resolve to the highest version satisfying the specifier (not the registry latest, which could fall outside the range); and `scan . --no-fetch` on a cold cache no longer prints "Scanned N packages, no payloads" and exits 0 — it reports the actually-scanned count and exits non-zero when nothing was scanned. The CLI also prints a one-line star nudge after a completed scan (suppress with `--quiet`). See the [changelog](./CHANGELOG.md).
 
 ---
 
@@ -67,6 +67,8 @@ pipx install promptaudit
 # or:  pip install promptaudit
 ```
 
+> ★ If PromptAudit catches a payload you'd have shipped, star it: https://github.com/SuperMarioYL/promptaudit
+
 Requires Python 3.12+. The CLI binary is `promptaudit`.
 
 ## Quickstart
@@ -102,13 +104,13 @@ JSON output for CI pipelines:
 promptaudit scan . --json > findings.json
 ```
 
-The JSON document carries both `findings` and an `unscanned` array. If a dependency's README can't be fetched it is reported as a coverage gap — not silently scored clean. Add `--fail-on-fetch-error` to make the scan exit `3` on any unscanned package, so CI gates on coverage as well as findings:
+The JSON document carries both `findings` and an `unscanned` array. If a dependency's README can't be fetched (network error, 404, or a yanked / unpublished version) it is reported as a coverage gap — not silently scored clean. Add `--fail-on-fetch-error` to make the scan exit `3` on any unscanned package, so CI gates on coverage as well as findings:
 
 ```bash
 promptaudit scan . --json --fail-on-fetch-error > findings.json
 ```
 
-Exit codes: `0` clean · `1` critical finding(s) · `2` usage error · `3` unscanned package (with `--fail-on-fetch-error`).
+Exit codes: `0` clean · `1` critical finding(s) · `2` usage error · `3` coverage gap (unscanned package with `--fail-on-fetch-error`, or zero packages scanned).
 
 Inspect the loaded rule corpus:
 
@@ -147,6 +149,7 @@ The **labeled prompt-injection corpus** ([`src/promptaudit/corpus/seed_payloads.
 | `--force-refetch` | flag | off | Re-download package text even if cached. |
 | `--no-fetch` | flag | off | Skip the fetch step; scan only what's already cached. |
 | `--fail-on-fetch-error` | flag | off | Exit `3` if any dependency could not be fetched and was left unscanned (gate CI on coverage). |
+| `--quiet` | flag | off | Suppress non-essential output (e.g. the post-scan star nudge). |
 
 ## vs LangGraph (positioning)
 
@@ -173,7 +176,7 @@ The CLI is **open-source under MIT and free to self-host**. For teams shipping C
 | **Team — Growth** | $399 / mo | Up to 50 devs · MCP-server scan mode · audit log |
 | **Team — Scale** | $1,200 / mo | Unlimited devs · private payload submission · SOC2-friendly retention |
 
-Annual contracts: 2 months free. → **[Join the hosted-CI waitlist](https://github.com/supermario-leo/promptaudit/issues/new?title=Hosted+CI+waitlist&body=Org+%2F+team+size%3A%0AStack%3A%0AAgent+in+use%3A)** (issue template — we'll reach out before the App opens).
+Annual contracts: 2 months free. → **[Join the hosted-CI waitlist](https://github.com/SuperMarioYL/promptaudit/issues/new?title=Hosted+CI+waitlist&body=Org+%2F+team+size%3A%0AStack%3A%0AAgent+in+use%3A)** (issue template — we'll reach out before the App opens).
 
 ## Roadmap
 
@@ -206,9 +209,9 @@ gh repo edit --add-topic mcp --add-topic coding-agent --add-topic prompt-injecti
 ```
 PromptAudit — the dep-tree scanner that catches prompt-injection payloads
 aimed at your Coding Agent. Built for the MCP era. 30+ seed rules, regex
-+ curated corpus, no LLM needed. https://github.com/supermario-leo/promptaudit
++ curated corpus, no LLM needed. https://github.com/SuperMarioYL/promptaudit
 ```
 
 ---
 
-<sub>Built by <a href="https://github.com/supermario-leo">@supermario-leo</a>. Issues, PRs, and new payload contributions welcome.</sub>
+<sub>Built by <a href="https://github.com/SuperMarioYL">@SuperMarioYL</a>. Issues, PRs, and new payload contributions welcome.</sub>

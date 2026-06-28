@@ -45,21 +45,39 @@ def render_terminal(
     console = console or Console()
 
     if not findings:
-        console.print(
-            Panel(
-                Text.assemble(
-                    ("PromptAudit", "bold green"),
-                    " — no prompt-injection payloads found.\n",
-                    (
-                        f"Scanned {scanned_packages} packages."
-                        if scanned_packages is not None
-                        else "Scanned cached package corpus."
+        if scanned_packages is not None and scanned_packages == 0:
+            # Zero packages scanned = a coverage gap (cold cache under
+            # --no-fetch, or every fetch errored), NOT a clean bill. Render it
+            # as a yellow coverage panel so a cold-cache run can't masquerade
+            # as "no payloads found" green.
+            console.print(
+                Panel(
+                    Text.assemble(
+                        ("PromptAudit", "bold yellow"),
+                        " — scanned 0 packages (cache empty / cold).\n",
+                        "Run without --no-fetch to populate the cache, "
+                        "or review the fetch warnings above.",
                     ),
-                ),
-                border_style="green",
-                box=SIMPLE_HEAVY,
+                    border_style="yellow",
+                    box=SIMPLE_HEAVY,
+                )
             )
-        )
+        else:
+            console.print(
+                Panel(
+                    Text.assemble(
+                        ("PromptAudit", "bold green"),
+                        " — no prompt-injection payloads found.\n",
+                        (
+                            f"Scanned {scanned_packages} packages."
+                            if scanned_packages is not None
+                            else "Scanned cached package corpus."
+                        ),
+                    ),
+                    border_style="green",
+                    box=SIMPLE_HEAVY,
+                )
+            )
         _print_unscanned(console, unscanned)
         _print_footer(console)
         return

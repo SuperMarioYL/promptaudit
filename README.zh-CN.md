@@ -9,9 +9,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/supermario-leo/promptaudit/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"/></a>
-  <a href="https://github.com/supermario-leo/promptaudit/releases"><img src="https://img.shields.io/badge/release-v0.2.0-orange.svg" alt="v0.2.0"/></a>
-  <a href="https://github.com/supermario-leo/promptaudit/actions"><img src="https://img.shields.io/badge/CI-passing-brightgreen.svg" alt="CI"/></a>
+  <a href="https://github.com/SuperMarioYL/promptaudit/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"/></a>
+  <a href="https://github.com/SuperMarioYL/promptaudit/releases"><img src="https://img.shields.io/github/v/release/SuperMarioYL/promptaudit" alt="latest release"/></a>
+  <a href="https://github.com/SuperMarioYL/promptaudit/actions"><img src="https://img.shields.io/badge/CI-passing-brightgreen.svg" alt="CI"/></a>
   <img src="https://img.shields.io/badge/python-3.12%2B-blue.svg" alt="Python 3.12+"/>
   <img src="https://img.shields.io/badge/Coding%20Agent-%E5%B7%B2%E4%BF%9D%E6%8A%A4-8A6CF0.svg" alt="Coding Agent protected"/>
   <img src="https://img.shields.io/badge/MCP--ready-%E6%94%AF%E6%8C%81-7C3AED.svg" alt="MCP-ready"/>
@@ -19,7 +19,7 @@
 
 > **PromptAudit 是面向 Coding Agent 的依赖树扫描器，专门捕获藏在依赖元数据里的 prompt-injection 负载。**
 
-> **v0.2.0 新变化** —— 一次稳定性强化发布。即便在很长、缩进很深的行上，标红的片段也能可靠地包含攻击字符串；`--json` 输出的 `source_file` 现在是跨机器稳定的逻辑路径（不再泄漏 `~/.promptaudit` 这样的本机家目录）；无法下载的依赖会被标记为 `unscanned` 覆盖缺口，而不是悄悄按"零命中"放行（`--fail-on-fetch-error` → 退出码 `3`）；npm `lockfileVersion 1` 项目现在与 v2/v3 一致地跳过 peer/optional 依赖（仅运行时依赖）。详见 [更新日志](./CHANGELOG.md)。
+> **v0.3.0 新变化** —— 修复 + 增长发布。404 / 被撤回版本（本身就是一个供应链危险信号）现在会被标记为 `unscanned` 覆盖缺口，而不再被悄悄按"零命中"放行；`requirements.txt` 里的 `~=1.4.2` 兼容版本锁定现在会解析到满足该约束的最高版本（而不是注册表最新版——后者可能落在兼容范围之外）；冷缓存下 `scan . --no-fetch` 不再打印"扫描了 N 个包、无负载"并退出 0——它会报告真正扫描的数量，并在零扫描时以非零码退出。CLI 在一次完整扫描后还会打印一行 star 提示（用 `--quiet` 抑制）。详见 [更新日志](./CHANGELOG.md)。
 
 ---
 
@@ -67,6 +67,8 @@ pipx install promptaudit
 # 或者：pip install promptaudit
 ```
 
+> ★ 如果 PromptAudit 帮你抓到了一个你本会误上的负载，欢迎 star：https://github.com/SuperMarioYL/promptaudit
+
 需要 Python 3.12+。命令行入口是 `promptaudit`。
 
 ## 快速上手
@@ -102,13 +104,13 @@ CRITICAL  PI-001-imperative-to-agent-delete
 promptaudit scan . --json > findings.json
 ```
 
-JSON 文档同时包含 `findings` 和 `unscanned` 两个数组。如果某个依赖的 README 拉取失败，它会被报告为覆盖缺口，而**不会被悄悄按"零命中"放行**。加上 `--fail-on-fetch-error` 可让扫描在出现任何未扫描包时以退出码 `3` 退出，这样 CI 不仅能卡命中，也能卡扫描覆盖率：
+JSON 文档同时包含 `findings` 和 `unscanned` 两个数组。如果某个依赖的 README 拉取失败（网络错误、404、或被撤回 / 未发布的版本），它会被报告为覆盖缺口，而**不会被悄悄按"零命中"放行**。加上 `--fail-on-fetch-error` 可让扫描在出现任何未扫描包时以退出码 `3` 退出，这样 CI 不仅能卡命中，也能卡扫描覆盖率：
 
 ```bash
 promptaudit scan . --json --fail-on-fetch-error > findings.json
 ```
 
-退出码：`0` 干净 · `1` 命中 critical · `2` 用法错误 · `3` 存在未扫描的包（需配合 `--fail-on-fetch-error`）。
+退出码：`0` 干净 · `1` 命中 critical · `2` 用法错误 · `3` 覆盖缺口（配合 `--fail-on-fetch-error` 的未扫描包，或零包扫描）。
 
 查看当前加载了哪些规则：
 
@@ -147,6 +149,7 @@ cli (click)
 | `--force-refetch` | 标志 | 关闭 | 即使缓存存在也重新拉取 |
 | `--no-fetch` | 标志 | 关闭 | 跳过拉取，只扫描已有缓存 |
 | `--fail-on-fetch-error` | 标志 | 关闭 | 若有依赖拉取失败、未被扫描，则以退出码 `3` 退出（用于在 CI 卡覆盖率） |
+| `--quiet` | 标志 | 关闭 | 抑制非必要输出（例如扫描后的 star 提示） |
 
 ## 与 LangGraph 的定位对比
 
@@ -173,7 +176,7 @@ CLI **基于 MIT 协议开源，可自托管**。对于在生产环境跑 Coding
 | **Team — Growth** | $399 / 月 | 最多 50 位开发者 · MCP server 扫描模式 · 审计日志 |
 | **Team — Scale** | $1,200 / 月 | 无限制 · 支持私有负载提交 · 满足 SOC2 留存要求 |
 
-年付优惠：免 2 个月。 → **[加入托管 CI 等待名单](https://github.com/supermario-leo/promptaudit/issues/new?title=Hosted+CI+waitlist&body=%E5%9B%A2%E9%98%9F%2F%E8%A7%84%E6%A8%A1%3A%0A%E6%8A%80%E6%9C%AF%E6%A0%88%3A%0A%E5%9C%A8%E7%94%A8%E7%9A%84%20Agent%3A)**（issue 模板，App 开放前会主动联系）。
+年付优惠：免 2 个月。 → **[加入托管 CI 等待名单](https://github.com/SuperMarioYL/promptaudit/issues/new?title=Hosted+CI+waitlist&body=%E5%9B%A2%E9%98%9F%2F%E8%A7%84%E6%A8%A1%3A%0A%E6%8A%80%E6%9C%AF%E6%A0%88%3A%0A%E5%9C%A8%E7%94%A8%E7%9A%84%20Agent%3A)**（issue 模板，App 开放前会主动联系）。
 
 ## 路线图
 
@@ -206,9 +209,9 @@ gh repo edit --add-topic mcp --add-topic coding-agent --add-topic prompt-injecti
 ```
 PromptAudit —— 面向 Coding Agent 的依赖树扫描器，专抓 prompt-injection
 负载。为 MCP 时代而生。30+ 条种子规则，正则 + 精挑语料库，无需大模型。
-https://github.com/supermario-leo/promptaudit
+https://github.com/SuperMarioYL/promptaudit
 ```
 
 ---
 
-<sub>由 <a href="https://github.com/supermario-leo">@supermario-leo</a> 构建。欢迎提 issue / PR / 新负载贡献。</sub>
+<sub>由 <a href="https://github.com/SuperMarioYL">@SuperMarioYL</a> 构建。欢迎提 issue / PR / 新负载贡献。</sub>

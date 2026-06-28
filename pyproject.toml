@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "promptaudit"
-version = "0.2.0"
+version = "0.3.0"
 description = "Dep-tree scanner that catches prompt-injection payloads aimed at your Coding Agent."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -41,9 +41,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/supermario-leo/promptaudit"
-Repository = "https://github.com/supermario-leo/promptaudit"
-Issues = "https://github.com/supermario-leo/promptaudit/issues"
+Homepage = "https://github.com/SuperMarioYL/promptaudit"
+Repository = "https://github.com/SuperMarioYL/promptaudit"
+Issues = "https://github.com/SuperMarioYL/promptaudit/issues"
 
 [project.scripts]
 promptaudit = "promptaudit.cli:main"

@@ -111,6 +111,39 @@ def scan(
     return findings
 
 
+def packages_with_coverage(
+    packages: Iterable[ResolvedPackage], cache_root: Path | None = None
+) -> tuple[list[ResolvedPackage], list[ResolvedPackage]]:
+    """Split ``packages`` into ``(scanned, missing)`` by cache presence + source files.
+
+    A package is "scanned" iff its cache dir exists AND contains at least one
+    source file the scanner reads (readme/summary/errors). Packages missing from
+    the cache — a cold/partial cache, a never-fetched dep, or a stale empty dir
+    — are returned as "missing" so the CLI can surface them as
+    ``UnscannedPackage`` even under ``--no-fetch``. Without this, ``scan .
+    --no-fetch`` on a cold cache prints "Scanned N packages, no payloads" and
+    exits 0 having scanned zero — a false-clean on the silent-false-negative
+    axis. ``scan()`` itself stays a pure function over whatever the cache holds;
+    coverage accounting lives here so the CLI can report the actually-scanned
+    count, not the resolved count.
+    """
+    cache_root = (cache_root or DEFAULT_CACHE_ROOT).expanduser()
+    scanned: list[ResolvedPackage] = []
+    missing: list[ResolvedPackage] = []
+    for pkg in packages:
+        pkg_dir = cache_dir_for(pkg, cache_root)
+        if pkg_dir.exists() and _has_source_file(pkg_dir):
+            scanned.append(pkg)
+        else:
+            missing.append(pkg)
+    return scanned, missing
+
+
+def _has_source_file(pkg_dir: Path) -> bool:
+    """True iff the cache dir holds at least one source file the scanner reads."""
+    return any((pkg_dir / name).exists() for name in SOURCE_FILES)
+
+
 def scan_text(
     text: str,
     *,
