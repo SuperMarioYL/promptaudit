@@ -59,3 +59,5 @@ CLAUDE.md
 .builder_*.txt
 .spawn.*.log
 BUILD_SETUP_NEXT_STEPS.md
+.publish*.log
+PUBLISH_BLOCKED.md
