@@ -19,7 +19,7 @@
 
 > **PromptAudit is the dep-tree scanner that catches prompt-injection payloads aimed at your Coding Agent.**
 
-> **What's new in v0.3.0** — a fix + growth release. A 404 / yanked-version fetch (itself a supply-chain red flag) is now surfaced as an `unscanned` coverage gap instead of silently scoring the dep clean; `~=1.4.2` compatible-release pins in `requirements.txt` now resolve to the highest version satisfying the specifier (not the registry latest, which could fall outside the range); and `scan . --no-fetch` on a cold cache no longer prints "Scanned N packages, no payloads" and exits 0 — it reports the actually-scanned count and exits non-zero when nothing was scanned. The CLI also prints a one-line star nudge after a completed scan (suppress with `--quiet`). See the [changelog](./CHANGELOG.md).
+> **What's new in v0.4.0** — a bug-hardening release. A crafted high-ratio sdist (a decompression bomb) can no longer OOM the scanner: the sdist string sweep now caps total uncompressed bytes and member count, not just the compressed download. Transitive deps gated by a host-only PEP 508 marker (`sys_platform == "win32"`, old-Python, extras) are no longer dropped silently — they're surfaced as a `marker_skipped` coverage gap, and the new `--target-python` / `--target-platform` flags let you audit a cross-platform install (e.g. resolve win32-gated deps from a Linux CI runner). And on the no-lockfile `package.json` path, range specs (`^1.2.0`, `~1.2`, `1.x`, `>=1 <2`) now resolve to the highest published version satisfying the range instead of 404-ing as a bogus "version" and leaving the dep unscanned (`workspace:` / `file:` / `git+` specs are skipped explicitly). See the [changelog](./CHANGELOG.md).
 
 ---
 
@@ -104,7 +104,7 @@ JSON output for CI pipelines:
 promptaudit scan . --json > findings.json
 ```
 
-The JSON document carries both `findings` and an `unscanned` array. If a dependency's README can't be fetched (network error, 404, or a yanked / unpublished version) it is reported as a coverage gap — not silently scored clean. Add `--fail-on-fetch-error` to make the scan exit `3` on any unscanned package, so CI gates on coverage as well as findings:
+The JSON document carries both `findings` and an `unscanned` array. If a dependency's README can't be fetched (network error, 404, or a yanked / unpublished version), or if a transitive dep is gated by a PEP 508 marker that doesn't apply to the scanner's host (`marker_skipped:<marker>`), it is reported as a coverage gap — not silently scored clean. To audit an install for a different platform/runtime, pass `--target-platform windows` (or `linux` / `darwin`) and/or `--target-python 3.8` so host-only deps resolve. Add `--fail-on-fetch-error` to make the scan exit `3` on any unscanned package, so CI gates on coverage as well as findings:
 
 ```bash
 promptaudit scan . --json --fail-on-fetch-error > findings.json
@@ -149,6 +149,8 @@ The **labeled prompt-injection corpus** ([`src/promptaudit/corpus/seed_payloads.
 | `--force-refetch` | flag | off | Re-download package text even if cached. |
 | `--no-fetch` | flag | off | Skip the fetch step; scan only what's already cached. |
 | `--fail-on-fetch-error` | flag | off | Exit `3` if any dependency could not be fetched and was left unscanned (gate CI on coverage). |
+| `--target-python` | `X.Y` | host | Evaluate PEP 508 markers against this Python version (e.g. `3.8`) so a cross-version install can be audited. |
+| `--target-platform` | `OS` | host | Evaluate PEP 508 markers against this platform (`windows` / `linux` / `darwin`) so a win32-gated dep resolves when auditing a Windows install from CI. |
 | `--quiet` | flag | off | Suppress non-essential output (e.g. the post-scan star nudge). |
 
 ## vs LangGraph (positioning)

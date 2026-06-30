@@ -45,6 +45,18 @@ from .resolver import (
 DEFAULT_CACHE_ROOT = Path.home() / ".promptaudit" / "cache"
 MAX_TARBALL_BYTES = 8 * 1024 * 1024  # don't pull >8MB tarballs just to grep a README
 MAX_TEXT_FILE_BYTES = 512 * 1024
+# Decompression-bomb guard. MAX_TARBALL_BYTES bounds the COMPRESSED download and
+# MAX_TEXT_FILE_BYTES bounds a SINGLE member, but neither bounds the TOTAL
+# uncompressed bytes across all members: a crafted high-ratio sdist of thousands
+# of just-under-512KB highly-compressible members fits under the 8MB compressed
+# cap yet expands to ~1GB once each member is fh.read() into memory, OOMing/hanging
+# the scanner on a routine `promptaudit scan .` (an attacker-controlled PyPI sdist
+# is exactly the supply-chain surface this tool audits). We therefore cap the
+# running total of uncompressed bytes read across all members, the number of
+# members inspected, and read each member through a bounded reader so a single
+# lying-size member can't blow the budget in one read.
+MAX_SDIST_UNCOMPRESSED_BYTES = 24 * 1024 * 1024  # total expanded bytes budget
+MAX_SDIST_MEMBERS = 2000  # members inspected before we stop walking the archive
 README_CANDIDATE_NAMES = (
     "README.md",
     "README.MD",
@@ -304,6 +316,36 @@ def _pick_sdist_url(urls: list[dict]) -> str | None:
     return None
 
 
+class _BudgetExceeded(Exception):
+    """Raised to abort sdist extraction once a hard budget is hit.
+
+    Either the total uncompressed bytes read, the member count inspected, or the
+    500-string early-exit. Caught so the caller returns what it collected so far
+    rather than the whole (possibly malicious) archive.
+    """
+
+
+def _read_member_bounded(fh, remaining: int) -> bytes:
+    """Read at most ``remaining`` bytes from a member, ignoring its declared size.
+
+    A decompression bomb can declare a small ``member.size`` yet stream far more
+    on read; reading in capped chunks means even a lying member can never push us
+    past the running uncompressed budget in a single ``fh.read()`` call.
+    """
+    cap = max(0, min(remaining, MAX_TEXT_FILE_BYTES))
+    if cap == 0:
+        raise _BudgetExceeded("uncompressed byte budget exhausted")
+    # +1 so we can detect a member that exceeds the per-member cap and skip it
+    # without materialising the whole thing.
+    data = fh.read(cap + 1)
+    if len(data) > cap:
+        # Member is larger than we allow — drop it (don't scan a partial,
+        # potentially misleading slice) but charge the cap against the budget so
+        # a flood of oversized members still terminates the walk.
+        return b""
+    return data
+
+
 def _extract_strings_from_sdist(
     session: requests.Session, sdist_url: str
 ) -> list[str]:
@@ -318,6 +360,9 @@ def _extract_strings_from_sdist(
 
     collected: list[str] = []
     seen: set[str] = set()
+    # Mutable accounting shared across members. ``budget`` is the remaining
+    # uncompressed-byte allowance; ``members`` counts archive entries inspected.
+    budget = {"bytes": MAX_SDIST_UNCOMPRESSED_BYTES, "members": 0}
 
     def _scan_bytes(blob: bytes) -> None:
         for match in STRING_LITERAL_RE.finditer(blob):
@@ -327,7 +372,23 @@ def _extract_strings_from_sdist(
             seen.add(candidate)
             collected.append(candidate)
             if len(collected) >= 500:
-                raise StopIteration
+                raise _BudgetExceeded("string cap reached")
+
+    def _charge_member() -> None:
+        """Count one inspected member; abort once the member-count cap is hit."""
+        budget["members"] += 1
+        if budget["members"] > MAX_SDIST_MEMBERS:
+            raise _BudgetExceeded("member count cap reached")
+
+    def _read_and_account(fh) -> bytes:
+        """Read a member bounded by the running budget and debit what we read."""
+        if budget["bytes"] <= 0:
+            raise _BudgetExceeded("uncompressed byte budget exhausted")
+        blob = _read_member_bounded(fh, budget["bytes"])
+        # Always charge the per-member cap (not just len(blob)) so a flood of
+        # oversized-and-skipped members still drains the budget and terminates.
+        budget["bytes"] -= max(len(blob), MAX_TEXT_FILE_BYTES)
+        return blob
 
     try:
         buf = io.BytesIO(payload)
@@ -335,29 +396,37 @@ def _extract_strings_from_sdist(
             try:
                 with zipfile.ZipFile(buf) as zf:
                     for info in zf.infolist():
-                        if info.is_dir() or info.file_size > MAX_TEXT_FILE_BYTES:
+                        if info.is_dir():
                             continue
                         if not info.filename.endswith((".py", ".txt", ".md", ".rst")):
                             continue
+                        _charge_member()
+                        # Honour the declared size as a cheap pre-filter, but the
+                        # bounded read below is the real guard against a lying size.
+                        if info.file_size > MAX_TEXT_FILE_BYTES:
+                            continue
                         with zf.open(info) as fh:
-                            _scan_bytes(fh.read())
+                            _scan_bytes(_read_and_account(fh))
             except zipfile.BadZipFile:
-                return []
+                return collected
         else:
             try:
                 with tarfile.open(fileobj=buf, mode="r:*") as tar:
-                    for member in tar.getmembers():
-                        if not member.isfile() or member.size > MAX_TEXT_FILE_BYTES:
+                    for member in tar:
+                        if not member.isfile():
                             continue
                         if not member.name.endswith((".py", ".txt", ".md", ".rst")):
+                            continue
+                        _charge_member()
+                        if member.size > MAX_TEXT_FILE_BYTES:
                             continue
                         fh = tar.extractfile(member)
                         if fh is None:
                             continue
-                        _scan_bytes(fh.read())
+                        _scan_bytes(_read_and_account(fh))
             except tarfile.TarError:
-                return []
-    except StopIteration:
+                return collected
+    except _BudgetExceeded:
         pass
 
     return collected

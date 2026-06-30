@@ -4,6 +4,63 @@ All notable changes to PromptAudit are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-07-01
+
+Bug-hardening release. External demand stayed zero (0 issues / 0 PRs / 0 forks,
+stars flat at 1 over the 14 days post-0.3.0) and the install→star decoupling
+persists post-CTA, but the 30-day kill clock has not closed — so v0.4.0
+deliberately holds new growth scope and spends the version closing three
+post-ship bug-hunt findings, matching the 0.2.0 (4 fixes) / 0.3.0 (3 fixes)
+cadence. Both items the 0.3.0 changelog deferred ("re-hunt next pass") land here.
+
+### Fixed
+
+- **A crafted high-ratio sdist can no longer OOM / hang the scanner.** The sdist
+  string sweep bounded only the *compressed* download (8 MB) and rejected only
+  *individual* members over 512 KB — so a malicious sdist of thousands of
+  just-under-512 KB highly-compressible members fit under the compressed cap yet
+  expanded to ~1 GB once each member was read into memory (verified: a 1.06 MB
+  `.tar.gz` forcing ~1000 MB of reads), and the 500-string early-exit never
+  tripped because the members carried no quote-delimited literals. The sweep now
+  tracks a running budget of total *uncompressed* bytes (24 MB) and caps the
+  member count (2000), reading each member through a bounded reader — applied
+  identically to the tar and zip paths — and returns what it collected so far
+  once any limit is hit. An attacker-controlled PyPI sdist is exactly the
+  supply-chain surface this tool audits, so this closes a denial-of-service on a
+  routine `promptaudit scan .`.
+- **Deps skipped by a host-only PEP 508 marker are no longer dropped silently.**
+  A transitive dep gated by a marker that evaluates `False` on the scanner host
+  (`sys_platform == "win32"`, `platform_system == "Windows"`,
+  `python_version < "3.8"`, or an extras-only `extra == "..."`) was never
+  fetched or scanned and produced no machine-readable signal — a silent
+  false-negative for a Windows developer (or a CI runner whose platform differs
+  from the project's runtime target). Such deps are now surfaced as an
+  `unscanned` coverage gap with reason `marker_skipped:<marker>`, and two new
+  flags — `--target-python X.Y` and `--target-platform windows|linux|darwin` —
+  evaluate markers against a chosen environment so a cross-platform install can
+  be audited (e.g. resolve win32-gated deps from a Linux runner). Compound
+  markers with an extra are retried with an empty `extra` so their host/OS/python
+  half still resolves.
+- **No-lockfile npm range specs now resolve to a real published version.** On
+  the `package.json` fallback (no `package-lock.json`), range specs were passed
+  through verbatim as the "version" whenever the first character was a digit
+  (`~1.2` → `"1.2"`, `>=1.0 <2.0` → `"1.0"`, `1.x` → `"1.x"`), so the fetcher
+  GET-ed a non-version that 404-ed and — after the 0.3.0 fix — was correctly
+  surfaced as unscanned, degrading the tool to "scans nothing" for every
+  range-specified direct dep in a lockfile-less npm project. Ranges
+  (`^` / `~` / x-range / comparator set / `||`) now resolve to the highest
+  published registry version satisfying the range (mirroring the PyPI `~=`
+  max-satisfying lookup), and non-registry specs (`workspace:`, `npm:`, `file:`,
+  `link:`, `git+`, `github:`, …) are skipped explicitly instead of being
+  fetched as a bogus version.
+
+### Added
+
+- `--target-python` / `--target-platform` flags on `promptaudit scan` for
+  auditing PEP 508 markers against a non-host environment.
+- `marker_skipped:<marker>` entries in the `unscanned` array of the
+  `promptaudit.findings/v1` JSON document.
+
 ## [0.3.0] — 2026-06-28
 
 Fix + growth release. Post-ship signal stayed thin (0 issues / 0 PRs / 0 forks,
@@ -137,6 +194,7 @@ report aimed at gating CI.
   ecosystem per minor version.
 - No MCP-server scan mode yet — `awesome-mcp-servers` ingestion is m4.
 
+[0.4.0]: https://github.com/SuperMarioYL/promptaudit/releases/tag/v0.4.0
 [0.3.0]: https://github.com/SuperMarioYL/promptaudit/releases/tag/v0.3.0
 [0.2.0]: https://github.com/SuperMarioYL/promptaudit/releases/tag/v0.2.0
 [0.1.0]: https://github.com/SuperMarioYL/promptaudit/releases/tag/v0.1.0

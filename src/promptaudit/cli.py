@@ -21,7 +21,7 @@ from rich.console import Console
 from . import __version__
 from .fetcher import DEFAULT_CACHE_ROOT, fetch_all
 from .report import render_json, render_terminal
-from .resolver import ResolverError, resolve
+from .resolver import MarkerSkipped, ResolverError, resolve
 from .rules import SEVERITY_ORDER, load_rules
 from .scanner import (
     UnscannedPackage,
@@ -89,6 +89,25 @@ def main() -> None:
     ),
 )
 @click.option(
+    "--target-python",
+    default=None,
+    metavar="X.Y",
+    help=(
+        "Evaluate PEP 508 markers against this Python version (e.g. 3.8) instead "
+        "of the scanner host, so a cross-version install can be audited."
+    ),
+)
+@click.option(
+    "--target-platform",
+    default=None,
+    metavar="OS",
+    help=(
+        "Evaluate PEP 508 markers against this platform "
+        "(windows / linux / darwin) instead of the scanner host, so a "
+        "win32-gated dep is resolved when auditing a Windows install from CI."
+    ),
+)
+@click.option(
     "-q",
     "--quiet",
     is_flag=True,
@@ -103,12 +122,24 @@ def scan_cmd(
     force_refetch: bool,
     no_fetch: bool,
     fail_on_fetch_error: bool,
+    target_python: str | None,
+    target_platform: str | None,
     quiet: bool,
 ) -> None:
     """Resolve, fetch, and scan PROJECT_ROOT for prompt-injection payloads."""
     console = Console(stderr=as_json)  # keep stdout clean when emitting JSON
+    # Collect transitive deps dropped by a non-applicable PEP 508 marker so the
+    # coverage gap is surfaced (not silently dropped) — a win32/old-python/extras
+    # marker evaluates False on the scanner host yet IS installed on the project's
+    # real runtime target.
+    marker_skipped: list[MarkerSkipped] = []
     try:
-        packages = resolve(project_root)
+        packages = resolve(
+            project_root,
+            target_python=target_python,
+            target_platform=target_platform,
+            marker_skipped=marker_skipped,
+        )
     except ResolverError as exc:
         click.echo(f"promptaudit: {exc}", err=True)
         sys.exit(EXIT_USAGE_ERROR)
@@ -157,6 +188,20 @@ def scan_cmd(
                 ecosystem=pkg.ecosystem,
                 reason=reason,
                 via_path=tuple(pkg.via_path),
+            )
+        )
+    # Transitive deps dropped by a host-only PEP 508 marker are a coverage gap on
+    # the project's real runtime target — surface them as unscanned (with the
+    # marker) rather than letting them vanish silently. version is unknown (never
+    # resolved), so report "*".
+    for ms in marker_skipped:
+        unscanned.append(
+            UnscannedPackage(
+                package=ms.name,
+                version="*",
+                ecosystem=ms.ecosystem,
+                reason=f"marker_skipped:{ms.marker}",
+                via_path=tuple(ms.via_path),
             )
         )
     actually_scanned = len(scanned_pkgs)

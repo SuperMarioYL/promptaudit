@@ -19,7 +19,7 @@
 
 > **PromptAudit 是面向 Coding Agent 的依赖树扫描器，专门捕获藏在依赖元数据里的 prompt-injection 负载。**
 
-> **v0.3.0 新变化** —— 修复 + 增长发布。404 / 被撤回版本（本身就是一个供应链危险信号）现在会被标记为 `unscanned` 覆盖缺口，而不再被悄悄按"零命中"放行；`requirements.txt` 里的 `~=1.4.2` 兼容版本锁定现在会解析到满足该约束的最高版本（而不是注册表最新版——后者可能落在兼容范围之外）；冷缓存下 `scan . --no-fetch` 不再打印"扫描了 N 个包、无负载"并退出 0——它会报告真正扫描的数量，并在零扫描时以非零码退出。CLI 在一次完整扫描后还会打印一行 star 提示（用 `--quiet` 抑制）。详见 [更新日志](./CHANGELOG.md)。
+> **v0.4.0 新变化** —— 缺陷加固发布。精心构造的高压缩比 sdist（解压炸弹）不再能 OOM 扫描器：sdist 字符串扫描现在会对解压后的总字节数和成员数量设上限，而不只是限制压缩包下载体积。被仅适用于主机的 PEP 508 标记（`sys_platform == "win32"`、旧版 Python、extras）门控的传递依赖不再被悄悄丢弃——它们会作为 `marker_skipped` 覆盖缺口被暴露出来，同时新增 `--target-python` / `--target-platform` 参数让你审计跨平台安装（例如从 Linux CI runner 解析 win32 门控依赖）。此外，在无 lockfile 的 `package.json` 路径上，范围声明（`^1.2.0`、`~1.2`、`1.x`、`>=1 <2`）现在会解析到满足该范围的最高已发布版本，而不再作为伪造的"版本号"去请求并 404、把依赖留成未扫描（`workspace:` / `file:` / `git+` 声明会被显式跳过）。详见 [更新日志](./CHANGELOG.md)。
 
 ---
 
@@ -104,7 +104,7 @@ CRITICAL  PI-001-imperative-to-agent-delete
 promptaudit scan . --json > findings.json
 ```
 
-JSON 文档同时包含 `findings` 和 `unscanned` 两个数组。如果某个依赖的 README 拉取失败（网络错误、404、或被撤回 / 未发布的版本），它会被报告为覆盖缺口，而**不会被悄悄按"零命中"放行**。加上 `--fail-on-fetch-error` 可让扫描在出现任何未扫描包时以退出码 `3` 退出，这样 CI 不仅能卡命中，也能卡扫描覆盖率：
+JSON 文档同时包含 `findings` 和 `unscanned` 两个数组。如果某个依赖的 README 拉取失败（网络错误、404、或被撤回 / 未发布的版本），或某个传递依赖被一个不适用于扫描器主机的 PEP 508 标记门控（`marker_skipped:<marker>`），它会被报告为覆盖缺口，而**不会被悄悄按"零命中"放行**。若要审计面向其他平台 / 运行时的安装，可传入 `--target-platform windows`（或 `linux` / `darwin`）和 / 或 `--target-python 3.8`，让仅适用于该环境的依赖也能被解析。加上 `--fail-on-fetch-error` 可让扫描在出现任何未扫描包时以退出码 `3` 退出，这样 CI 不仅能卡命中，也能卡扫描覆盖率：
 
 ```bash
 promptaudit scan . --json --fail-on-fetch-error > findings.json
@@ -149,6 +149,8 @@ cli (click)
 | `--force-refetch` | 标志 | 关闭 | 即使缓存存在也重新拉取 |
 | `--no-fetch` | 标志 | 关闭 | 跳过拉取，只扫描已有缓存 |
 | `--fail-on-fetch-error` | 标志 | 关闭 | 若有依赖拉取失败、未被扫描，则以退出码 `3` 退出（用于在 CI 卡覆盖率） |
+| `--target-python` | `X.Y` | 主机 | 按指定 Python 版本（如 `3.8`）评估 PEP 508 标记，以审计跨版本安装 |
+| `--target-platform` | `OS` | 主机 | 按指定平台（`windows` / `linux` / `darwin`）评估 PEP 508 标记，从 CI 审计 Windows 安装时可解析 win32 门控依赖 |
 | `--quiet` | 标志 | 关闭 | 抑制非必要输出（例如扫描后的 star 提示） |
 
 ## 与 LangGraph 的定位对比
