@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/SuperMarioYL/promptaudit/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"/></a>
+  <a href="https://github.com/SuperMarioYL/promptaudit/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0"/></a>
   <a href="https://github.com/SuperMarioYL/promptaudit/releases"><img src="https://img.shields.io/github/v/release/SuperMarioYL/promptaudit" alt="latest release"/></a>
   <a href="https://github.com/SuperMarioYL/promptaudit/actions"><img src="https://img.shields.io/badge/CI-passing-brightgreen.svg" alt="CI"/></a>
   <img src="https://img.shields.io/badge/python-3.12%2B-blue.svg" alt="Python 3.12+"/>
