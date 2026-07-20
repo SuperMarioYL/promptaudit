@@ -8,7 +8,7 @@ version = "0.4.0"
 description = "Dep-tree scanner that catches prompt-injection payloads aimed at your Coding Agent."
 readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 authors = [
     { name = "supermario_leo", email = "leo.stack@outlook.com" },
 ]
@@ -25,7 +25,7 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Intended Audience :: Information Technology",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
