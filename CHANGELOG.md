@@ -181,7 +181,7 @@ report aimed at gating CI.
   output; `--corpus` flag to override the bundled rule set.
 - jqwik regression fixture (`tests/fixtures/jqwik_payload.txt`) — the
   May 2026 payload triggers at least one `critical` finding under unit test.
-- MIT license for code; CC0 dual-license for the seed corpus so security
+- Apache 2.0 license for code; CC0 dual-license for the seed corpus so security
   researchers can reuse it.
 - GitHub Actions CI: pytest on Python 3.12.
 
