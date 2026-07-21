@@ -1,0 +1,96 @@
+{
+  "schema": 1,
+  "name": "promptaudit",
+  "github": "https://github.com/SuperMarioYL/promptaudit",
+  "host": "promptaudit.lei6393.com",
+  "lang": { "primary": "zh", "toggle": true },
+  "accent": ["#e6a144", "#f59e0b", "#7c2d12"],
+  "hero": {
+    "eyebrow": {
+      "zh": "扫依赖树 · 抓注入 · 护住 Agent",
+      "en": "Scan deps · Catch injection · Shield your agent"
+    },
+    "headline": {
+      "zh": "一条命令\n扫出依赖里瞄向 Coding Agent 的注入指令",
+      "en": "One command catches the\nprompt-injection hiding in your dependencies"
+    },
+    "sub": {
+      "zh": "解析你的 npm + PyPI 依赖树，抓取每个包的 README 与文档文本，用一套经过实战沉淀的注入指令规则集逐条比对 —— 命中即报文件、行号、片段、严重级别。jqwik 事件的武器化 README 会被原样标红报出。",
+      "en": "Resolves your npm + PyPI dep tree, pulls each package's README and doc text, matches a battle-tested injection-payload rule set, and reports file, line, snippet, and severity on every hit. The jqwik incident's weaponized README is flagged red verbatim."
+    },
+    "command": "promptaudit scan .",
+    "cta": { "zh": "看它怎么扫", "en": "See it scan" },
+    "ctaGithub": { "zh": "GitHub", "en": "GitHub" },
+    "scroll": { "zh": "往下看原理", "en": "How it works" }
+  },
+  "advantages": [
+    {
+      "title": {
+        "zh": "扫的是依赖真正塞进 Agent 上下文的文本",
+        "en": "Scans the text deps actually feed your agent — not version numbers"
+      },
+      "body": {
+        "zh": "npm 与 PyPI 的 README、包描述、甚至 sdist 里的字符串字面量都会被 Coding Agent 读进上下文。PromptAudit 抓的就是这些文本 —— 武器化依赖藏指令的地方。本地缓存，二次扫描秒回。",
+        "en": "READMEs, package descriptions, even string literals inside sdists get read into your Coding Agent's context. PromptAudit pulls exactly that text — where weaponized deps hide their instructions. Cached locally, so re-scans come back instantly."
+      },
+      "chips": ["› npm + PyPI", "› README / 描述 / sdist 字符串", "› 本地缓存"]
+    },
+    {
+      "title": {
+        "zh": "命中的注入指令，直接给到文件、行号、片段",
+        "en": "Every hit points at the file, line, and snippet"
+      },
+      "body": {
+        "zh": "不是一句“发现 3 条可疑”——而是精确到哪个包、哪个文件、第几行、带上下文片段。critical 级别直接让 CI 失败，--json 输出给流水线机器消费。",
+        "en": "Not a vague '3 suspicious hits' — but exactly which package, which file, which line, with a context snippet. Critical findings fail CI, and --json hands the pipeline machine-readable output."
+      },
+      "chips": ["› file:line:snippet", "› critical → CI 失败", "› --json 机器可读"]
+    },
+    {
+      "title": {
+        "zh": "拉不下来的包，不再静默“判”干净",
+        "en": "A dep that can't be fetched is never silently scored clean"
+      },
+      "body": {
+        "zh": "404 的 yanked 版本、抓取失败的包、被平台 marker 跳过的依赖 —— 全部作为“未扫描”覆盖率缺口暴露在 --json 里，而不是假装扫描通过。--fail-on-fetch-error 让 CI 直接卡在覆盖率上。",
+        "en": "A 404'd yanked version, a failed fetch, a dep skipped by a platform marker — all surface as 'unscanned' coverage gaps in --json, never masquerading as a clean pass. --fail-on-fetch-error gates CI on coverage, not just findings."
+      },
+      "chips": ["› yanked / 404 不再静默", "› marker-skipped 可见", "› --fail-on-fetch-error"]
+    },
+    {
+      "title": {
+        "zh": "审计你真正发布到的平台，不卡在扫描机本身",
+        "en": "Audit the platform you ship to — not the scanner's host"
+      },
+      "body": {
+        "zh": "Windows 专属依赖、旧 Python 版本依赖默认会被扫描机环境跳过。--target-platform windows / --target-python 3.8 让你从 Linux CI 审计 Windows 安装，跳过的依赖也会作为覆盖率缺口报出来。",
+        "en": "Windows-only deps and old-Python deps get skipped by the scanner host by default. --target-platform windows / --target-python 3.8 audit a Windows install from a Linux CI runner — and skipped deps still surface as coverage gaps."
+      },
+      "chips": ["› --target-platform", "› --target-python", "› 跨平台覆盖"]
+    }
+  ],
+  "scene": {
+    "kind": "hub-nodes",
+    "nodes": ["npm", "PyPI", "README", "docstring", "MCP"]
+  },
+  "cta": {
+    "headline": {
+      "zh": "装一条命令，挡住武器化依赖",
+      "en": "Install one command, block weaponized deps"
+    },
+    "sub": {
+      "zh": "开源（Apache-2.0）。hosted-CI 版本做 PR 拦截 + 每日 corpus 更新 + MCP server 扫描。",
+      "en": "Open source (Apache-2.0). The hosted-CI tier adds PR-blocking, daily corpus updates, and MCP-server scanning."
+    },
+    "button": {
+      "zh": "pipx install promptaudit",
+      "en": "pipx install promptaudit"
+    }
+  },
+  "footer": {
+    "tag": {
+      "zh": "为 Coding Agent 时代做的依赖扫描",
+      "en": "Dependency scanning for the Coding Agent era"
+    }
+  }
+}
