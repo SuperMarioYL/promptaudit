@@ -30,10 +30,15 @@ from packaging.specifiers import SpecifierSet
 from packaging.utils import canonicalize_name
 from packaging.version import Version
 
+from . import __version__ as _PA_VERSION
+
 NPM_REGISTRY = "https://registry.npmjs.org"
 PYPI_REGISTRY = "https://pypi.org/pypi"
 HTTP_TIMEOUT = 15
-USER_AGENT = "promptaudit/0.1 (+https://github.com/supermario-leo/promptaudit)"
+# Derive the version from the package __version__ so the UA never freezes
+# (it was pinned to "0.1" through v0.1-v0.4, lying to every registry hit) and
+# point at the canonical repo (the old "supermario-leo" slug was a dead link).
+USER_AGENT = f"promptaudit/{_PA_VERSION} (+https://github.com/SuperMarioYL/promptaudit)"
 
 
 @dataclass(frozen=True)

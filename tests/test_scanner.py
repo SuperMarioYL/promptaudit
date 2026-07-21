@@ -927,3 +927,275 @@ def test_npm_range_matcher_caret_and_tilde():
 
     star = _npm_range_matcher("*")
     assert star(Version("99.9.9"))
+
+
+# --------------------------------------------------------------------------
+# v0.5.0 regression tests
+# --------------------------------------------------------------------------
+
+
+def test_npm_tarball_readme_extraction_is_lazy(monkeypatch):
+    """fix-npm-tarball-readme-extraction-decompression-bomb: the npm tarball
+    README extractor must NOT call eager ``tar.getmembers()`` (which decompresses
+    the whole ``r:gz`` archive and materialises a TarInfo for every member
+    before the find-loop). A crafted high-member-count npm tarball is the tool's
+    canonical supply-chain surface; eager enumeration OOMs/hangs the scanner.
+    The extractor must iterate lazily and stop at the first README, returning
+    the README text WITHOUT enumerating the filler that follows it."""
+    import gzip
+    import io as _io
+    import tarfile as _tar
+
+    import requests
+
+    from promptaudit import fetcher
+    from promptaudit.fetcher import _extract_readme_from_tarball
+
+    readme = b"# my-lib\nA harmless README with no injection payloads.\n"
+    raw = _io.BytesIO()
+    with _tar.open(fileobj=raw, mode="w") as tar:
+        # Real README near the front (the conventional npm layout).
+        info = _tar.TarInfo(name="package/README.md")
+        info.size = len(readme)
+        tar.addfile(info, _io.BytesIO(readme))
+        # A flood of filler members AFTER the README. The old eager
+        # ``getmembers()`` materialised ALL of these before the find-loop; the
+        # lazy loop must return the README and never reach them.
+        filler = b"a" * 200
+        for i in range(fetcher.MAX_SDIST_MEMBERS + 500):
+            fi = _tar.TarInfo(name=f"package/filler_{i}.py")
+            fi.size = len(filler)
+            tar.addfile(fi, _io.BytesIO(filler))
+    blob = gzip.compress(raw.getvalue())
+    assert len(blob) < fetcher.MAX_TARBALL_BYTES, "fixture must fit the compressed cap"
+
+    # The hard signal: the NEW lazy path must NOT call ``getmembers()`` at all.
+    getmembers_calls = {"n": 0}
+    real_getmembers = _tar.TarFile.getmembers
+
+    def _counting_getmembers(self):
+        getmembers_calls["n"] += 1
+        return real_getmembers(self)
+
+    monkeypatch.setattr(_tar.TarFile, "getmembers", _counting_getmembers)
+
+    monkeypatch.setattr(
+        requests.Session,
+        "get",
+        lambda self, url, *a, **kw: _StreamResponse(status_code=200, content=blob),
+    )
+
+    session = requests.Session()
+    extracted = _extract_readme_from_tarball(
+        session, "https://example.test/my-lib-1.0.0.tgz"
+    )
+    # Happy path preserved: the README text is still returned.
+    assert extracted is not None
+    assert "harmless README" in extracted
+    # Revert-verified: the old eager ``getmembers()`` path would call it once;
+    # the lazy path must call it zero times.
+    assert getmembers_calls["n"] == 0, (
+        "extractor must iterate lazily, not call eager getmembers(); "
+        f"getmembers was called {getmembers_calls['n']} time(s)"
+    )
+
+
+def test_npm_tarball_readme_extraction_bounded_when_readme_past_cap(monkeypatch):
+    """fix-npm-tarball-readme-extraction-decompression-bomb (DoS bound): if the
+    README sits PAST the member-count cap (a malicious tarball that buries the
+    README under a flood of filler), the extractor must give up (→ None →
+    empty_corpus unscanned) at the cap rather than decompress the whole bomb.
+    The old eager ``getmembers()`` path would have enumerated every member,
+    found the README, and returned it — decompressing the whole archive first."""
+    import gzip
+    import io as _io
+    import tarfile as _tar
+
+    import requests
+
+    from promptaudit import fetcher
+    from promptaudit.fetcher import MAX_SDIST_MEMBERS, _extract_readme_from_tarball
+
+    readme = b"# my-lib\nREADME buried under a flood of filler.\n"
+    raw = _io.BytesIO()
+    with _tar.open(fileobj=raw, mode="w") as tar:
+        # Filler BEFORE the README, more than the cap.
+        filler = b"a" * 200
+        for i in range(MAX_SDIST_MEMBERS + 500):
+            fi = _tar.TarInfo(name=f"package/filler_{i}.py")
+            fi.size = len(filler)
+            tar.addfile(fi, _io.BytesIO(filler))
+        # README at the very end — past the cap.
+        info = _tar.TarInfo(name="package/README.md")
+        info.size = len(readme)
+        tar.addfile(info, _io.BytesIO(readme))
+    blob = gzip.compress(raw.getvalue())
+    assert len(blob) < fetcher.MAX_TARBALL_BYTES, "fixture must fit the compressed cap"
+
+    getmembers_calls = {"n": 0}
+    real_getmembers = _tar.TarFile.getmembers
+
+    def _counting_getmembers(self):
+        getmembers_calls["n"] += 1
+        return real_getmembers(self)
+
+    monkeypatch.setattr(_tar.TarFile, "getmembers", _counting_getmembers)
+    monkeypatch.setattr(
+        requests.Session,
+        "get",
+        lambda self, url, *a, **kw: _StreamResponse(status_code=200, content=blob),
+    )
+
+    session = requests.Session()
+    result = _extract_readme_from_tarball(
+        session, "https://example.test/buried-1.0.0.tgz"
+    )
+    # The cap fires before the buried README is reached → None (coverage gap),
+    # NOT the README text the old eager path would have returned.
+    assert result is None, (
+        "extractor must bail at the member-count cap when the README is buried "
+        "under more than MAX_SDIST_MEMBERS filler, rather than decompress the "
+        f"whole bomb; got {result!r}"
+    )
+    assert getmembers_calls["n"] == 0, (
+        "lazy path must not call eager getmembers(); called "
+        f"{getmembers_calls['n']} time(s)"
+    )
+
+
+def test_npm_tarball_readme_extraction_finds_small_readme(monkeypatch):
+    """fix-npm-tarball-readme-extraction-decompression-bomb (happy path): a
+    benign npm tarball with a small README must still yield its README text
+    (the lazy/bounded fix must not break the happy path)."""
+    import gzip
+    import io as _io
+    import tarfile as _tar
+
+    import requests
+
+    from promptaudit.fetcher import _extract_readme_from_tarball
+
+    readme = b"# my-lib\nA harmless README with no injection payloads.\n"
+    raw = _io.BytesIO()
+    with _tar.open(fileobj=raw, mode="w") as tar:
+        info = _tar.TarInfo(name="package/README.md")
+        info.size = len(readme)
+        tar.addfile(info, _io.BytesIO(readme))
+    blob = gzip.compress(raw.getvalue())
+
+    monkeypatch.setattr(
+        requests.Session,
+        "get",
+        lambda self, url, *a, **kw: _StreamResponse(status_code=200, content=blob),
+    )
+
+    session = requests.Session()
+    extracted = _extract_readme_from_tarball(session, "https://example.test/my-lib-1.0.0.tgz")
+    assert extracted is not None
+    assert "harmless README" in extracted
+
+
+def test_user_agent_carries_live_version_and_real_repo_slug():
+    """fix-stale-user-agent-and-waitlist-url: the registry User-Agent must
+    carry the live __version__ (it was frozen at "0.1" through v0.1-v0.4) and
+    point at the canonical SuperMarioYL repo, not the dead supermario-leo slug."""
+    from promptaudit import __version__
+    from promptaudit.resolver import USER_AGENT
+
+    assert __version__ in USER_AGENT, (
+        f"UA must carry the live __version__ {__version__}; got {USER_AGENT!r}"
+    )
+    assert "SuperMarioYL/promptaudit" in USER_AGENT, USER_AGENT
+    # The stale slug must be gone for good.
+    assert "supermario-leo" not in USER_AGENT, USER_AGENT
+    assert "promptaudit/0.1" not in USER_AGENT, USER_AGENT
+
+
+def test_waitlist_url_points_at_real_repo():
+    """fix-stale-user-agent-and-waitlist-url: the hosted-CI waitlist URL
+    printed in every scan footer must resolve to the canonical repo (the old
+    supermario-leo slug was a dead link) and at a real README anchor."""
+    from promptaudit.report import WAITLIST_URL
+
+    assert "SuperMarioYL/promptaudit" in WAITLIST_URL, WAITLIST_URL
+    assert "supermario-leo" not in WAITLIST_URL, WAITLIST_URL
+    # The old "#hosted-ci-waitlist" anchor never existed in the README.
+    assert "#hosted-ci-waitlist" not in WAITLIST_URL, WAITLIST_URL
+
+
+def test_fetch_command_exits_3_on_fetch_error_not_1(tmp_path, monkeypatch):
+    """fix-fetch-command-exit-code-collides-with-critical: ``promptaudit fetch``
+    must exit 3 (EXIT_FETCH_ERROR, a coverage gap) on a fetch error — NOT 1
+    (EXIT_CRITICAL_FOUND, the ``scan`` command's critical-finding contract).
+    Reusing exit 1 for a fetch error collided with ``scan``'s critical signal
+    and false-positived any CI gate branching on ``$? -eq 1``."""
+    import requests
+    from click.testing import CliRunner
+
+    from promptaudit.cli import main
+
+    (tmp_path / "package-lock.json").write_text(
+        json.dumps(
+            {
+                "name": "myapp",
+                "lockfileVersion": 2,
+                "packages": {"node_modules/broken-dep": {"version": "1.0.0"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    cache_root = tmp_path / "cache"
+
+    def _boom(*args, **kwargs):
+        raise requests.RequestException("simulated registry outage")
+
+    monkeypatch.setattr(requests.Session, "get", _boom)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["fetch", str(tmp_path), "--cache-root", str(cache_root)]
+    )
+    # 3 = EXIT_FETCH_ERROR (coverage gap). Must NOT be 1 (critical-finding code).
+    assert result.exit_code == 3, (
+        "fetch must exit 3 (coverage gap) on a fetch error, not 1 (the "
+        f"critical-finding code); got exit {result.exit_code}\n{result.output}"
+    )
+    assert "errors=1" in result.output, result.output
+
+
+def test_fetch_command_exits_0_on_clean_fetch(tmp_path, monkeypatch):
+    """fix-fetch-command-exit-code-collides-with-critical (happy path): a clean
+    fetch (no errors) must exit 0."""
+    import requests
+    from click.testing import CliRunner
+
+    from promptaudit.cli import main
+
+    (tmp_path / "package-lock.json").write_text(
+        json.dumps(
+            {
+                "name": "myapp",
+                "lockfileVersion": 2,
+                "packages": {"node_modules/clean-dep": {"version": "1.0.0"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    cache_root = tmp_path / "cache"
+
+    monkeypatch.setattr(
+        requests.Session,
+        "get",
+        lambda self, url, *a, **kw: _FakeResponse(
+            status_code=200,
+            payload={"description": "a clean dep", "readme": "", "dist": {}},
+        ),
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["fetch", str(tmp_path), "--cache-root", str(cache_root)]
+    )
+    assert result.exit_code == 0, (
+        f"clean fetch must exit 0; got {result.exit_code}\n{result.output}"
+    )

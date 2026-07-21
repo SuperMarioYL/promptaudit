@@ -256,17 +256,46 @@ def _extract_readme_from_tarball(
 
     try:
         with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as tar:
-            for member in tar.getmembers():
+            # Iterate LAZILY (``for member in tar`` yields ``tar.next()`` one at
+            # a time) and break on the first README candidate. ``tar.getmembers()``
+            # is EAGER: it decompresses the whole ``r:gz`` archive and materialises
+            # a TarInfo (~500 B) for EVERY member before the find-loop — a
+            # DoS/OOM on a crafted high-member-count npm tarball (the tool's
+            # canonical supply-chain surface). The v0.4.0 decompression-bomb fix
+            # bounded the SDIST string sweep (``_extract_strings_from_sdist``)
+            # but this separate extractor was never given the same treatment, so
+            # the identical bomb class survived on the README channel.
+            members_seen = 0
+            for member in tar:
+                members_seen += 1
+                if members_seen > MAX_SDIST_MEMBERS:
+                    # Bound the decompression DoS: if the README isn't in the
+                    # first MAX_SDIST_MEMBERS entries, give up (→ empty_corpus
+                    # unscanned) rather than decompress a megabyte-bomb archive.
+                    break
                 if not member.isfile():
                     continue
                 # npm tarballs root everything at "package/<file>".
                 base = member.name.split("/", 1)[-1]
-                if base in README_CANDIDATE_NAMES and member.size <= MAX_TEXT_FILE_BYTES:
-                    fh = tar.extractfile(member)
-                    if fh is None:
-                        continue
-                    raw = fh.read()
-                    return raw.decode("utf-8", errors="replace")
+                if base not in README_CANDIDATE_NAMES:
+                    continue
+                # ``member.size`` is the DECLARED size; ``tarfile.extractfile``
+                # already caps ``fh.read()`` at ``member.size``, so the pre-filter
+                # below is the real per-member guard. Route the read through the
+                # sdist path's bounded reader anyway for defence-in-depth parity
+                # with ``_extract_strings_from_sdist`` (a lying-size member that
+                # somehow slipped past the pre-filter still can't blow memory).
+                if member.size > MAX_TEXT_FILE_BYTES:
+                    continue
+                fh = tar.extractfile(member)
+                if fh is None:
+                    continue
+                raw = _read_member_bounded(fh, MAX_TEXT_FILE_BYTES)
+                if not raw:
+                    # Member exceeded the per-member cap — keep looking rather
+                    # than read a partial / misleading README.
+                    continue
+                return raw.decode("utf-8", errors="replace")
     except (tarfile.TarError, OSError):
         return None
     return None

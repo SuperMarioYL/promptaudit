@@ -269,7 +269,13 @@ def fetch_cmd(project_root: Path, cache_root: Path | None, force: bool) -> None:
         f"fetched: ok={ok} skipped={skipped} errors={errored} "
         f"(cache={(cache_root or DEFAULT_CACHE_ROOT)})"
     )
-    sys.exit(EXIT_OK if errored == 0 else EXIT_CRITICAL_FOUND)
+    # Exit 3 (EXIT_FETCH_ERROR) on a fetch error — NOT 1 (EXIT_CRITICAL_FOUND),
+    # which is the ``scan`` subcommand's contract for "a critical finding
+    # landed". ``fetch`` produces no findings; reusing exit 1 for a coverage
+    # gap collided with ``scan``'s critical-finding signal and false-positived
+    # any CI gate branching on ``$? -eq 1``. Align both subcommands on exit 3
+    # for coverage gaps.
+    sys.exit(EXIT_OK if errored == 0 else EXIT_FETCH_ERROR)
 
 
 @main.command("rules")

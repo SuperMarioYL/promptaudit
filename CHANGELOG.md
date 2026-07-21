@@ -4,6 +4,55 @@ All notable changes to PromptAudit are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-07-21
+
+Bug-hardening release. External demand stayed zero (0 open issues / 0 PRs / 0
+forks, stars flat at 1) and the 30-day kill clock (§8) closes ~2026-07-22, so
+v0.5.0 is the last scheduled fix-train iteration before that falsifier is
+evaluated. It continues the 0.2.0–0.4.0 correctness-fix cadence with no new
+feature/growth scope.
+
+### Fixed
+
+- **A crafted high-member-count npm tarball can no longer hang / OOM the
+  scanner during README extraction.** The npm tarball README extractor called
+  eager `tar.getmembers()`, which decompresses the whole `r:gz` archive and
+  materialises a `TarInfo` object for every member before the find-loop, then
+  read the matching README member with an unbounded `fh.read()`. A crafted npm
+  tarball (the tool's canonical supply-chain surface — the jqwik hero fixture
+  is npm) of hundreds of thousands of tiny non-README members forced the
+  extractor to decompress the whole archive and hold every member's metadata
+  before it could find the README and exit. The 0.4.0 decompression-bomb fix
+  bounded the SDIST string sweep, but this separate extractor was never given
+  the same lazy/bounded treatment, so the identical DoS class survived on the
+  README channel. The extractor now iterates the archive lazily (`for member
+  in tar`), stops at the first README candidate, gives up after the same
+  `MAX_SDIST_MEMBERS` cap as the sdist path, and routes the README read through
+  the 0.4.0 bounded reader (`_read_member_bounded`) so a lying-size README
+  member can never blow memory in a single read.
+- **The registry User-Agent and the hosted-CI waitlist URL now point at the
+  real repo and carry the live version.** The User-Agent sent on every npm and
+  PyPI registry HTTP request was frozen at `promptaudit/0.1` (stale since
+  v0.1.0 — the package was at `0.4.0`) and advertised a wrong
+  `supermario-leo/promptaudit` slug, and the hosted-CI waitlist URL printed in
+  the footer of every terminal scan report used the same dead slug plus a
+  `#hosted-ci-waitlist` anchor that never existed in the README — breaking the
+  commercial monetization funnel (§1) on the exact surface a lead clicks
+  through after a scan. The User-Agent is now derived from `__version__` so it
+  never freezes again, and both URLs point at `github.com/SuperMarioYL/promptaudit`
+  (matching `pyproject.toml`), with the footer anchored at the real
+  `#pricing--hosted-ci` section.
+- **`promptaudit fetch` no longer exits 1 on a fetch error.** The `fetch`
+  subcommand exited with `EXIT_CRITICAL_FOUND` (1) when any package failed to
+  fetch — but exit 1 is the `scan` subcommand's contract for "a critical
+  prompt-injection finding landed", while `scan` deliberately uses a distinct
+  `EXIT_FETCH_ERROR` (3) for coverage gaps. So `promptaudit fetch` returning 1
+  on a fetch error collided with `promptaudit scan` returning 1 on a critical
+  payload, false-positiving any CI gate that branches on `$? -eq 1` to mean
+  "critical finding". `fetch` produces no findings, so exit 1 was unambiguously
+  a fetch error; it now exits 3 (`EXIT_FETCH_ERROR`) on fetch errors, aligning
+  a single exit-code contract across both subcommands.
+
 ## [0.4.0] — 2026-07-01
 
 Bug-hardening release. External demand stayed zero (0 issues / 0 PRs / 0 forks,

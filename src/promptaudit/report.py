@@ -29,7 +29,10 @@ SEVERITY_STYLES = {
     "high": "bold yellow",
     "medium": "cyan",
 }
-WAITLIST_URL = "https://github.com/supermario-leo/promptaudit#hosted-ci-waitlist"
+# Point at the canonical repo (the old "supermario-leo" slug was a dead link
+# printed in every scan footer) and at the real hosted-CI section anchor
+# (the previous "#hosted-ci-waitlist" anchor never existed in the README).
+WAITLIST_URL = "https://github.com/SuperMarioYL/promptaudit#pricing--hosted-ci"
 
 
 def render_terminal(
