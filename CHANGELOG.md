@@ -4,6 +4,70 @@ All notable changes to PromptAudit are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-07-25
+
+Correctness-fix release continuing the v0.2.0–v0.5.0 cadence. Three
+adversarial-input / transient-failure regressions on the tool's canonical
+supply-chain surfaces (a crafted high-member-count sdist, a crafted multi-MB
+registry-JSON doc, and a `~=` pin hit by a transient registry outage) — each
+audited the WRONG version, audited NOTHING silently, or OOMed/hung the
+scanner. Each fix ships with an adversarial regression test that is red on
+the v0.5.0 baseline.
+
+### Fixed
+
+- **A crafted high-member-count sdist can no longer truncate legit
+  >48-member sdists via the per-member byte budget.** The v0.5.0
+  `_read_and_account` charged `max(len(blob), MAX_TEXT_FILE_BYTES)` per
+  member, flooring every member at the 512KB per-member cap; the 24MB
+  uncompressed-byte budget therefore exhausted at 48 members (24MiB / 512KiB)
+  and `_BudgetExceeded` truncated the walk mid-archive — so a benign 60-member
+  sdist was scanned as if it had 48. `_read_member_bounded` now returns
+  `(blob, bytes_consumed)` and `_read_and_account` debits the ACTUAL bytes
+  consumed per member (a 1KB file debits 1KB, not 512KB), so a 60-member sdist
+  is scanned in full. The oversized-member flood guard is preserved: a member
+  that exceeds the per-member cap still charges `cap + 1`, so a flood of
+  oversized-and-skipped members still drains the budget and terminates the
+  walk (but a SINGLE huge file can't exhaust the whole budget on its own).
+- **npm/PyPI registry-JSON GETs are now bounded; a crafted multi-MB registry
+  doc can no longer OOM the scanner.** The v0.5.0 fetcher/resolver made
+  non-streaming `session.get()` + `.json()` calls against the npm and PyPI
+  registries with no byte cap (npm version docs, npm dependency docs, npm
+  dist-tags, PyPI release docs, PyPI `~=` max-satisfying) — a registry GET
+  that happens on every resolved package of every `promptaudit scan .`. A
+  crafted multi-MB registry doc (the tool's canonical supply-chain surface)
+  was parsed whole into memory, OOMing/hanging the scanner on a routine scan.
+  The registry-JSON GETs are now routed through the existing `_read_bounded`
+  streaming helper with a few-MB cap (`MAX_REGISTRY_JSON_BYTES`): an oversized
+  doc is abandoned → empty corpus / `_PinFailed` (coverage gap), not a silent
+  OOM. A shared `_get_registry_json` helper in `resolver.py` uses a
+  function-local import of `_read_bounded` to avoid the circular import
+  (`fetcher` imports `resolver` at module top).
+- **A `~=` pin hit by a transient registry outage no longer silently audits
+  the registry LATEST outside the pin range.** A `foo~=1.4.2` pin (means
+  `>=1.4.2, ==1.4.*`) whose `_resolve_pypi_max_satisfying` returned `None`
+  (a network blip / non-200 / unparseable body / no satisfying version) was
+  indistinguishable from the `None` a LOOSE spec (`>=`, `<`, wildcards)
+  returns — so `_pin_from_specifier` returned `None`, `_walk_pypi` took the
+  version-less `/{name}/json` latest path, and the scanner audited the
+  registry LATEST `2.0.0`, a version OUTSIDE the `~=1.4.2` range — a
+  false-clean on the "audit the version you actually install" promise, on
+  the exact transient-failure surface (a registry blip). The lookup now
+  returns a `_PinFailed` sentinel on failure (distinct from genuine `None`
+  for loose specs, whose latest path is preserved); `_walk_pypi` surfaces a
+  `_PinFailed` as an `UnscannedPackage` coverage gap (via the existing
+  `marker_skipped` plumbing) instead of falling through to latest.
+
+### Tests
+
+- `tests/test_v060_fixes.py` (new): three adversarial regression tests, each
+  red on the v0.5.0 baseline. (1) a 60-member sdist asserts all 60 members
+  scanned (red: 48). (2) a >5MB registry-JSON stub asserts the fetch is
+  bounded and `.json()` is never called on the whole doc (red: parses whole).
+  (3) a `~=1.4.2` pin with `_resolve_pypi_max_satisfying` monkeypatched to
+  return `_PinFailed` asserts the dep surfaces as `UnscannedPackage` and is
+  NOT audited as the out-of-range 2.0.0 (red: audits 2.0.0).
+
 ## [0.5.0] — 2026-07-21
 
 Bug-hardening release. External demand stayed zero (0 open issues / 0 PRs / 0

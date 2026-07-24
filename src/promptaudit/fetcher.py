@@ -36,6 +36,7 @@ import requests
 
 from .resolver import (
     HTTP_TIMEOUT,
+    MAX_REGISTRY_JSON_BYTES,
     NPM_REGISTRY,
     PYPI_REGISTRY,
     USER_AGENT,
@@ -208,11 +209,19 @@ def _fetch_npm(
     """Pull README + description for an npm package; fall back to tarball if empty."""
     sources: dict[str, str] = {}
     url = f"{NPM_REGISTRY}/{pkg.name}/{pkg.version}"
-    resp = session.get(url, timeout=HTTP_TIMEOUT)
+    # Streaming + bounded (fix-registry-json-fetch-unbounded): the v0.5.0 path
+    # used non-streaming ``session.get()`` + ``.json()`` with no byte cap, so a
+    # crafted multi-MB registry doc OOMed the scanner on a routine scan.
+    resp = session.get(url, timeout=HTTP_TIMEOUT, stream=True)
     if resp.status_code == 404:
         raise _VersionNotFound(f"{pkg.name}@{pkg.version} not on npm registry")
     resp.raise_for_status()
-    manifest = resp.json()
+    manifest = _read_json_bounded(resp, MAX_REGISTRY_JSON_BYTES)
+    if not isinstance(manifest, dict):
+        # Oversized / unparseable registry doc → empty corpus (coverage gap),
+        # not a silent clean scan. We can't reach the tarball URL either
+        # (it lives in manifest.dist.tarball), so nothing to fall back to.
+        return sources
 
     readme = (manifest.get("readme") or "").strip()
     description = (manifest.get("description") or "").strip()
@@ -290,7 +299,7 @@ def _extract_readme_from_tarball(
                 fh = tar.extractfile(member)
                 if fh is None:
                     continue
-                raw = _read_member_bounded(fh, MAX_TEXT_FILE_BYTES)
+                raw, _consumed = _read_member_bounded(fh, MAX_TEXT_FILE_BYTES)
                 if not raw:
                     # Member exceeded the per-member cap — keep looking rather
                     # than read a partial / misleading README.
@@ -309,11 +318,17 @@ def _fetch_pypi(
 ) -> dict[str, str]:
     sources: dict[str, str] = {}
     url = f"{PYPI_REGISTRY}/{pkg.name}/{pkg.version}/json"
-    resp = session.get(url, timeout=HTTP_TIMEOUT)
+    # Streaming + bounded (fix-registry-json-fetch-unbounded): the v0.5.0 path
+    # used non-streaming ``session.get()`` + ``.json()`` with no byte cap, so a
+    # crafted multi-MB registry doc OOMed the scanner on a routine scan.
+    resp = session.get(url, timeout=HTTP_TIMEOUT, stream=True)
     if resp.status_code == 404:
         raise _VersionNotFound(f"{pkg.name}@{pkg.version} not on PyPI")
     resp.raise_for_status()
-    payload = resp.json()
+    payload = _read_json_bounded(resp, MAX_REGISTRY_JSON_BYTES)
+    if not isinstance(payload, dict):
+        # Oversized / unparseable registry doc → empty corpus (coverage gap).
+        return sources
     info = payload.get("info") or {}
 
     summary = (info.get("summary") or "").strip()
@@ -354,12 +369,22 @@ class _BudgetExceeded(Exception):
     """
 
 
-def _read_member_bounded(fh, remaining: int) -> bytes:
+def _read_member_bounded(fh, remaining: int) -> tuple[bytes, int]:
     """Read at most ``remaining`` bytes from a member, ignoring its declared size.
 
-    A decompression bomb can declare a small ``member.size`` yet stream far more
-    on read; reading in capped chunks means even a lying member can never push us
-    past the running uncompressed budget in a single ``fh.read()`` call.
+    Returns ``(blob, bytes_consumed)``. A decompression bomb can declare a small
+    ``member.size`` yet stream far more on read; reading in capped chunks means
+    even a lying member can never push us past the running uncompressed budget in
+    a single ``fh.read()`` call.
+
+    ``bytes_consumed`` is the ACTUAL bytes read for a normal member (so a 1KB
+    file debits only 1KB of the budget, not the 512KB per-member cap — the
+    v0.5.0 ``max(len(blob), MAX_TEXT_FILE_BYTES)`` floor charged every member
+    at the full cap, so the 24MB budget exhausted at 48 members and truncated
+    legit >48-member sdists). For an oversized member (one exceeding the
+    per-member cap) ``bytes_consumed`` is ``cap + 1``: the flood guard so a
+    flood of oversized members still drains the budget and terminates the walk,
+    but a SINGLE huge file can't exhaust the whole budget on its own.
     """
     cap = max(0, min(remaining, MAX_TEXT_FILE_BYTES))
     if cap == 0:
@@ -369,10 +394,10 @@ def _read_member_bounded(fh, remaining: int) -> bytes:
     data = fh.read(cap + 1)
     if len(data) > cap:
         # Member is larger than we allow — drop it (don't scan a partial,
-        # potentially misleading slice) but charge the cap against the budget so
-        # a flood of oversized members still terminates the walk.
-        return b""
-    return data
+        # potentially misleading slice) but charge cap+1 against the budget so
+        # a flood of oversized members still drains the budget and terminates.
+        return b"", cap + 1
+    return data, len(data)
 
 
 def _extract_strings_from_sdist(
@@ -413,10 +438,14 @@ def _extract_strings_from_sdist(
         """Read a member bounded by the running budget and debit what we read."""
         if budget["bytes"] <= 0:
             raise _BudgetExceeded("uncompressed byte budget exhausted")
-        blob = _read_member_bounded(fh, budget["bytes"])
-        # Always charge the per-member cap (not just len(blob)) so a flood of
-        # oversized-and-skipped members still drains the budget and terminates.
-        budget["bytes"] -= max(len(blob), MAX_TEXT_FILE_BYTES)
+        blob, bytes_consumed = _read_member_bounded(fh, budget["bytes"])
+        # Debit the ACTUAL bytes consumed (not the per-member cap) so a legit
+        # sdist of many small members isn't truncated at 48 — the v0.5.0
+        # ``max(len(blob), MAX_TEXT_FILE_BYTES)`` floor charged every member
+        # at the 512KB cap, exhausting the 24MB budget at 48 members. The
+        # oversized-member flood guard is preserved inside _read_member_bounded
+        # (it charges cap+1 for a lying-size member).
+        budget["bytes"] -= bytes_consumed
         return blob
 
     try:
@@ -476,6 +505,28 @@ def _read_bounded(resp: requests.Response, max_bytes: int) -> bytes | None:
             return None
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+def _read_json_bounded(
+    resp: requests.Response, max_bytes: int
+) -> dict | list | None:
+    """Read a streaming response capped at ``max_bytes`` and parse as JSON.
+
+    Returns ``None`` when the body exceeds the cap or fails to parse, so a
+    crafted multi-MB registry doc (the npm/PyPI registry GET surface hit on
+    every ``promptaudit scan .``) can't OOM the scanner — the v0.5.0 path used
+    non-streaming ``session.get()`` + ``.json()`` with no byte cap. Callers
+    treat ``None`` as a fetch failure → coverage gap (empty_corpus), not a
+    silent clean scan. NB: ``resp.json()`` is NEVER called — the body is parsed
+    via ``json.loads`` on the bounded bytes only.
+    """
+    payload = _read_bounded(resp, max_bytes)
+    if payload is None:
+        return None
+    try:
+        return json.loads(payload.decode("utf-8", errors="replace"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
 
 
 def _http_session() -> requests.Session:

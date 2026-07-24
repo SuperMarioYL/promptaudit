@@ -35,6 +35,13 @@ from . import __version__ as _PA_VERSION
 NPM_REGISTRY = "https://registry.npmjs.org"
 PYPI_REGISTRY = "https://pypi.org/pypi"
 HTTP_TIMEOUT = 15
+# Cap per registry-JSON GET (npm/PyPI registry docs). The v0.5.0 path used
+# non-streaming ``session.get()`` + ``.json()`` with no byte cap, so a crafted
+# multi-MB registry doc (the tool's canonical supply-chain surface — a registry
+# GET happens on every ``promptaudit scan .``) OOMed the scanner. Routed
+# through the fetcher's ``_read_bounded`` (streaming, chunked) at a few MB so
+# an oversized doc is abandoned → coverage gap, not a silent OOM.
+MAX_REGISTRY_JSON_BYTES = 4 * 1024 * 1024
 # Derive the version from the package __version__ so the UA never freezes
 # (it was pinned to "0.1" through v0.1-v0.4, lying to every registry hit) and
 # point at the canonical repo (the old "supermario-leo" slug was a dead link).
@@ -78,6 +85,30 @@ class MarkerSkipped:
 
 class ResolverError(RuntimeError):
     """Raised when no supported manifest is found or a manifest is malformed."""
+
+
+class _PinFailed:
+    """Sentinel: a ``~=`` pin's max-satisfying lookup FAILED (network blip /
+    non-200 / unparseable / body over the registry-JSON cap / no satisfying
+    version).
+
+    Distinct from ``None`` (which ``_pin_from_specifier`` returns for a genuine
+    LOOSE spec — ``>=``, ``<``, wildcards, bare names — that SHOULD fall
+    through to the PyPI walk's latest-resolution path). A ``_PinFailed`` must NOT
+    fall through to latest: that would audit a version outside the pin range
+    (e.g. registry LATEST ``2.0.0`` for a ``~=1.4.2`` pin), a false-clean on the
+    "audit the version you actually install" promise. The caller (``_walk_pypi``)
+    surfaces it as a coverage gap (``UnscannedPackage`` via the
+    ``marker_skipped`` plumbing) instead of fetching the version-less
+    ``/{name}/json`` latest path.
+
+    Previously ``_resolve_pypi_max_satisfying`` returned ``None`` on a network
+    blip, indistinguishable from a loose spec's ``None`` — so a transient
+    registry outage silently demoted a ``~=1.4.2`` pin to "audit whatever 2.0.0
+    the registry happens to advertise", exactly the wrong version.
+    """
+
+    __slots__ = ()
 
 
 def resolve(
@@ -354,13 +385,13 @@ def _resolve_npm_dist_tag(session: requests.Session, name: str, spec: str) -> st
         return spec
     if not spec or spec[0].isalpha():
         # Empty spec or a bare dist-tag word (latest/next/...).
-        try:
-            resp = session.get(f"{NPM_REGISTRY}/{name}", timeout=HTTP_TIMEOUT)
-            resp.raise_for_status()
-            tags = resp.json().get("dist-tags", {})
-            return tags.get(spec or "latest")
-        except requests.RequestException:
+        doc = _get_registry_json(
+            session, f"{NPM_REGISTRY}/{name}", MAX_REGISTRY_JSON_BYTES
+        )
+        if doc is None:
             return None
+        tags = doc.get("dist-tags", {})
+        return tags.get(spec or "latest")
     # Anything else is a range/version-ish spec — resolve max-satisfying.
     return _resolve_npm_max_satisfying(session, name, spec)
 
@@ -369,11 +400,10 @@ def _resolve_npm_max_satisfying(
     session: requests.Session, name: str, spec: str
 ) -> str | None:
     """Highest published npm version satisfying ``spec`` (``None`` if none/unreachable)."""
-    try:
-        resp = session.get(f"{NPM_REGISTRY}/{name}", timeout=HTTP_TIMEOUT)
-        resp.raise_for_status()
-        doc = resp.json()
-    except requests.RequestException:
+    doc = _get_registry_json(
+        session, f"{NPM_REGISTRY}/{name}", MAX_REGISTRY_JSON_BYTES
+    )
+    if doc is None:
         return None
 
     versions = list((doc.get("versions") or {}).keys())
@@ -514,14 +544,12 @@ def _npm_version_parts(body: str) -> tuple[int, int, int]:
 def _fetch_npm_dependencies(
     session: requests.Session, name: str, version: str
 ) -> dict[str, str]:
-    try:
-        resp = session.get(
-            f"{NPM_REGISTRY}/{name}/{version}", timeout=HTTP_TIMEOUT
-        )
-        resp.raise_for_status()
-        return resp.json().get("dependencies", {}) or {}
-    except requests.RequestException:
+    doc = _get_registry_json(
+        session, f"{NPM_REGISTRY}/{name}/{version}", MAX_REGISTRY_JSON_BYTES
+    )
+    if doc is None:
         return {}
+    return doc.get("dependencies", {}) or {}
 
 
 # ---------- PyPI ---------------------------------------------------------------
@@ -567,7 +595,7 @@ def _resolve_requirements_txt(
     walk to resolve to the latest release.
     """
     session = _http_session()
-    direct: list[tuple[str, str | None]] = []
+    direct: list[tuple[str, "str | None | _PinFailed"]] = []
     for raw in req_file.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or line.startswith("-"):
@@ -615,7 +643,7 @@ def _resolve_pyproject_project_deps(
         data = tomllib.load(fh)
     deps = data.get("project", {}).get("dependencies", []) or []
     session = _http_session()
-    direct: list[tuple[str, str | None]] = []
+    direct: list[tuple[str, "str | None | _PinFailed"]] = []
     for raw in deps:
         try:
             req = Requirement(raw)
@@ -633,9 +661,10 @@ def _resolve_pyproject_project_deps(
 
 def _pin_from_specifier(
     req: Requirement, session: requests.Session | None = None
-) -> str | None:
+) -> "str | None | _PinFailed":
     """Return a concrete version for an exact (``==``/``===``) or compatible-
-    release (``~=``) pin; ``None`` for anything looser.
+    release (``~=``) pin; ``None`` for anything looser; ``_PinFailed`` if a
+    ``~=`` pin's max-satisfying lookup failed.
 
     For ``==``/``===`` the specifier already names the version. For ``~=`` (e.g.
     ``~=1.4.2`` means ``>=1.4.2, ==1.4.*``) we resolve the highest version from
@@ -643,7 +672,9 @@ def _pin_from_specifier(
     version a real ``pip install`` would resolve to, not the registry latest,
     which may fall outside the compatible range (e.g. ``2.0.0`` for ``~=1.4.2``).
     Looser specifiers (``>=``, ``<``, ranges, wildcards, bare names) return
-    ``None`` and fall through to the PyPI walk's latest-resolution path.
+    ``None`` and fall through to the PyPI walk's latest-resolution path. A
+    ``~=`` pin whose lookup failed returns ``_PinFailed`` so ``_walk_pypi``
+    surfaces it as a coverage gap instead of falling through to latest.
     """
     has_tilde = False
     for spec in req.specifier:
@@ -658,23 +689,31 @@ def _pin_from_specifier(
 
 def _resolve_pypi_max_satisfying(
     session: requests.Session, name: str, specifier: SpecifierSet
-) -> str | None:
-    """Highest PyPI release version satisfying ``specifier`` (``None`` if none / unreachable).
+) -> "str | _PinFailed":
+    """Highest PyPI release version satisfying ``specifier``; ``_PinFailed`` on
+    failure (fetch error / over-cap / no satisfying version).
 
     Mirrors what ``pip install`` picks for a ``~=`` / range specifier: the newest
     non-prerelease release inside the constraint. Used so the scanner audits the
     version a real install resolves to, instead of the registry latest (which
     may violate the specifier — the core "audit the version you actually
     install" promise).
-    """
-    try:
-        resp = session.get(f"{PYPI_REGISTRY}/{name}/json", timeout=HTTP_TIMEOUT)
-        if resp.status_code != 200:
-            return None
-        releases = (resp.json().get("releases") or {})
-    except requests.RequestException:
-        return None
 
+    Returns ``_PinFailed`` (NOT ``None``) when the lookup fails — a network blip
+    / non-200 / over-cap body / no satisfying version. Previously these all
+    returned ``None``, indistinguishable from a loose spec's ``None``, so a
+    ``~=1.4.2`` pin on a transient registry outage silently demoted to "audit
+    the registry LATEST 2.0.0" (outside the ``~=1.4.2`` range). The
+    ``_PinFailed`` sentinel lets ``_walk_pypi`` surface the dep as a coverage
+    gap (UnscannedPackage) instead of falling through to the latest path.
+    """
+    doc = _get_registry_json(
+        session, f"{PYPI_REGISTRY}/{name}/json", MAX_REGISTRY_JSON_BYTES
+    )
+    if doc is None:
+        return _PinFailed()
+
+    releases = doc.get("releases") or {}
     candidates: list[Version] = []
     for ver_str in releases:
         try:
@@ -686,12 +725,15 @@ def _resolve_pypi_max_satisfying(
         if ver in specifier:
             candidates.append(ver)
     if not candidates:
-        return None
+        # The ~= pin is unresolvable against the published releases — a coverage
+        # gap (the pin names a version range nothing satisfies), NOT a licence
+        # to audit the registry latest outside the range.
+        return _PinFailed()
     return str(max(candidates))
 
 
 def _walk_pypi(
-    direct: list[tuple[str, str | None]],
+    direct: list[tuple[str, "str | None | _PinFailed"]],
     root_name: str,
     *,
     session: requests.Session | None = None,
@@ -702,13 +744,35 @@ def _walk_pypi(
         session = _http_session()
     visited: set[tuple[str, str]] = set()
     skipped_seen: set[tuple[str, str]] = set()
-    queue: list[tuple[str, str | None, tuple[str, ...]]] = [
+    queue: list[tuple[str, "str | None | _PinFailed", tuple[str, ...]]] = [
         (name, version, (root_name,)) for name, version in direct
     ]
     max_depth = 8
     while queue:
         name, version, via = queue.pop(0)
         if len(via) > max_depth:
+            continue
+        # fix-tilde-pin-lookup-failure-resolves-latest: a ``~=`` pin whose
+        # max-satisfying lookup FAILED (``_PinFailed``) must NOT fall through
+        # to the version-less ``/{name}/json`` latest path — that would audit
+        # the registry LATEST (e.g. 2.0.0), a version outside the ``~=1.4.2``
+        # range, a false-clean on the "audit the version you actually install"
+        # promise. Surface it as a coverage gap (UnscannedPackage via the
+        # marker_skipped plumbing) instead. Genuine ``None`` (loose spec)
+        # still falls through to the latest path below — preserved.
+        if isinstance(version, _PinFailed):
+            if marker_skipped is not None:
+                skip_key = (name, "pin_failed")
+                if skip_key not in skipped_seen:
+                    skipped_seen.add(skip_key)
+                    marker_skipped.append(
+                        MarkerSkipped(
+                            name=name,
+                            ecosystem="pypi",
+                            marker="pin_failed",
+                            via_path=(*via, name),
+                        )
+                    )
             continue
         info = _fetch_pypi_release(session, name, version)
         if info is None:
@@ -764,13 +828,10 @@ def _fetch_pypi_release(
         if version
         else f"{PYPI_REGISTRY}/{name}/json"
     )
-    try:
-        resp = session.get(url, timeout=HTTP_TIMEOUT)
-        if resp.status_code != 200:
-            return None
-        return resp.json().get("info", {})
-    except requests.RequestException:
+    doc = _get_registry_json(session, url, MAX_REGISTRY_JSON_BYTES)
+    if doc is None:
         return None
+    return doc.get("info", {})
 
 
 def _marker_applies(
@@ -807,6 +868,38 @@ def _load_json(path: Path) -> dict:
         return json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise ResolverError(f"malformed JSON in {path}: {exc}") from exc
+
+
+def _get_registry_json(
+    session: requests.Session, url: str, max_bytes: int
+) -> dict | None:
+    """GET ``url`` with a byte cap and parse as JSON; ``None`` on any failure.
+
+    Mirrors the "unreachable" semantic callers already handle: transport
+    error, non-200, a body exceeding ``max_bytes`` (crafted multi-MB registry
+    doc DoS), or unparseable JSON all collapse to ``None`` so the dep is left
+    unscanned rather than the scanner OOMing on a crafted registry doc — the
+    v0.5.0 path used non-streaming ``session.get()`` + ``.json()`` with no cap.
+
+    Uses a function-local import of the fetcher's ``_read_bounded`` to avoid a
+    circular import: ``fetcher`` imports ``resolver`` at module top, so a
+    top-level ``resolver`` → ``fetcher`` import would deadlock at load time.
+    """
+    from .fetcher import _read_bounded  # function-local: avoids circular import
+
+    try:
+        resp = session.get(url, timeout=HTTP_TIMEOUT, stream=True)
+        if resp.status_code != 200:
+            return None
+        body = _read_bounded(resp, max_bytes)
+    except requests.RequestException:
+        return None
+    if body is None:
+        return None
+    try:
+        return json.loads(body.decode("utf-8", errors="replace"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
 
 
 def _http_session() -> requests.Session:

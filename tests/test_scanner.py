@@ -306,11 +306,24 @@ def test_failed_fetch_is_surfaced_as_unscanned_not_silently_clean(
 
 
 class _FakeResponse:
-    """Minimal stand-in for requests.Response for fetcher monkeypatching."""
+    """Minimal stand-in for requests.Response for fetcher monkeypatching.
+
+    v0.6.0: the fetcher/resolver registry-JSON path now uses streaming
+    ``session.get(stream=True)`` + ``_read_bounded`` (``iter_content``) instead
+    of non-streaming ``.json()``, so a crafted multi-MB registry doc can't OOM
+    the scanner. ``iter_content`` serialises the payload back to JSON bytes so
+    the bounded read round-trips to the same dict the v0.5.0 ``.json()`` path
+    returned — keeping every existing monkeypatched test working unchanged.
+    """
 
     def __init__(self, *, status_code=200, payload=None):
         self.status_code = status_code
         self._payload = payload or {}
+
+    def iter_content(self, chunk_size=65536):
+        data = json.dumps(self._payload).encode("utf-8") if self._payload else b""
+        for i in range(0, len(data), chunk_size):
+            yield data[i : i + chunk_size]
 
     def json(self):
         return self._payload
@@ -619,9 +632,12 @@ def test_sdist_decompression_bomb_is_bounded(monkeypatch):
     real_member_bounded = fetcher._read_member_bounded
 
     def _counting_member_bounded(fh, remaining):
-        data = real_member_bounded(fh, remaining)
-        read_total["n"] += len(data)
-        return data
+        # _read_member_bounded now returns (blob, bytes_consumed); track the
+        # bytes read from the stream (consumed) so the bound assertion still
+        # measures real I/O, not the tuple length.
+        blob, consumed = real_member_bounded(fh, remaining)
+        read_total["n"] += consumed
+        return blob, consumed
 
     monkeypatch.setattr(fetcher, "_read_member_bounded", _counting_member_bounded)
 
