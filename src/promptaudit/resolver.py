@@ -111,6 +111,28 @@ class _PinFailed:
     __slots__ = ()
 
 
+class _NpmRangeUnsatisfiable:
+    """Sentinel: an npm range spec matched NO published version (the npm-side
+    analog of PyPI's ``_PinFailed``).
+
+    ``_resolve_npm_max_satisfying`` returns this — NOT ``dist-tags.latest`` —
+    when ``candidates`` is empty, so the no-lockfile walk surfaces the dep as a
+    coverage gap (``range_unsatisfiable:<spec>`` via the ``marker_skipped``
+    plumbing) instead of fetching + scanning the registry latest, which is
+    necessarily OUTSIDE the range (else it would itself be a candidate).
+    Auditing that out-of-range latest is the npm analog of v0.6.0's
+    ``fix-tilde-pin-lookup-failure-resolves-latest`` on the PyPI ``~=`` side:
+    ``npm install`` against such a registry would fail "No matching version",
+    so the tool would audit a version the project cannot even install and, if
+    clean, false-pass the CI gate. Distinct from ``None`` (which
+    ``_resolve_npm_dist_tag`` returns for a 404/unreachable registry doc —
+    surfaced as ``npm_doc_not_found``) so the two coverage-gap reasons stay
+    distinguishable.
+    """
+
+    __slots__ = ()
+
+
 def resolve(
     project_root: Path,
     *,
@@ -153,7 +175,9 @@ def resolve(
             seen.setdefault((pkg.ecosystem, pkg.name, pkg.version), pkg)
     elif npm_pkg.exists():
         found_manifest = True
-        for pkg in _resolve_npm_package_json(npm_pkg):
+        for pkg in _resolve_npm_package_json(
+            npm_pkg, marker_skipped=marker_skipped
+        ):
             seen.setdefault((pkg.ecosystem, pkg.name, pkg.version), pkg)
 
     if poetry_lock.exists():
@@ -295,11 +319,25 @@ def _walk_lockfile_v1(
             yield from _walk_lockfile_v1(nested, (*parent_path, name))
 
 
-def _resolve_npm_package_json(manifest: Path) -> Iterable[ResolvedPackage]:
+def _resolve_npm_package_json(
+    manifest: Path,
+    *,
+    marker_skipped: list[MarkerSkipped] | None = None,
+) -> Iterable[ResolvedPackage]:
     """No lockfile path: take direct deps from package.json and walk npm registry.
 
     This is the slow path. Recursion depth is capped to keep the network walk
     bounded; users without a lockfile get a best-effort tree.
+
+    ``marker_skipped``, if supplied, is appended with a ``MarkerSkipped`` for
+    every dep that cannot be resolved to a fetchable version — a range spec
+    with NO satisfying published version (``range_unsatisfiable:<spec>``) or a
+    404/unreachable registry doc (``npm_doc_not_found``) — so the CLI surfaces
+    the coverage gap as an ``UnscannedPackage`` instead of vanishing the dep.
+    This mirrors PyPI's ``_walk_pypi`` (which threads ``marker_skipped`` for
+    marker- and pin-failure drops); the npm no-lockfile walk previously did
+    ``if not version: continue`` with no signal, silently dropping a yanked /
+    unpublished package (a supply-chain red flag) on the resolve-time 404 path.
     """
     data = _load_json(manifest)
     root_name = data.get("name", "<root>")
@@ -308,6 +346,7 @@ def _resolve_npm_package_json(manifest: Path) -> Iterable[ResolvedPackage]:
         return
 
     visited: set[tuple[str, str]] = set()
+    skipped_seen: set[tuple[str, str]] = set()
     session = _http_session()
     # BFS so via_path stays shallow. We carry the RAW spec (not a pre-stripped
     # hint) so _resolve_npm_dist_tag can tell an exact version from a range/tag
@@ -326,7 +365,43 @@ def _resolve_npm_package_json(manifest: Path) -> Iterable[ResolvedPackage]:
             # registry by version — skip rather than 404 on a bogus "version".
             continue
         version = _resolve_npm_dist_tag(session, name, spec)
+        if isinstance(version, _NpmRangeUnsatisfiable):
+            # Range spec matched NO published version — do NOT fall back to
+            # dist-tags.latest (outside the range). Surface as a coverage gap
+            # (range_unsatisfiable:<spec>) so the wrong version is not audited.
+            if marker_skipped is not None:
+                reason = f"range_unsatisfiable:{spec}"
+                skip_key = (name, reason)
+                if skip_key not in skipped_seen:
+                    skipped_seen.add(skip_key)
+                    marker_skipped.append(
+                        MarkerSkipped(
+                            name=name,
+                            ecosystem="npm",
+                            marker=reason,
+                            via_path=(*via, name),
+                        )
+                    )
+            continue
         if not version:
+            # 404/unreachable registry doc (or a dist-tag absent from the doc)
+            # — a yanked/unpublished package is itself a supply-chain red flag;
+            # surface it as a coverage gap (npm_doc_not_found) rather than
+            # vanishing the dep. Mirrors PyPI's _walk_pypi handling of a
+            # fetch-time 404 (fix-404-empty-corpus-silent-clean) on the
+            # resolve-time range/tag path.
+            if marker_skipped is not None:
+                skip_key = (name, "npm_doc_not_found")
+                if skip_key not in skipped_seen:
+                    skipped_seen.add(skip_key)
+                    marker_skipped.append(
+                        MarkerSkipped(
+                            name=name,
+                            ecosystem="npm",
+                            marker="npm_doc_not_found",
+                            via_path=(*via, name),
+                        )
+                    )
             continue
         if (name, version) in visited:
             continue
@@ -426,9 +501,15 @@ def _resolve_npm_max_satisfying(
             candidates.append(ver)
     if candidates:
         return str(max(candidates))
-    # No published version matched the range — fall back to the dist-tag latest
-    # so the dep is still scanned at *some* real version rather than dropped.
-    return (doc.get("dist-tags") or {}).get("latest")
+    # No published version matched the range — do NOT fall back to
+    # dist-tags.latest: that version is necessarily OUTSIDE the range (else it
+    # would itself be a candidate), so auditing it would scan a version the
+    # project cannot even install and false-pass the CI gate. Return the
+    # _NpmRangeUnsatisfiable sentinel (npm analog of PyPI's _PinFailed) so the
+    # no-lockfile walk surfaces the dep as a coverage gap
+    # (range_unsatisfiable:<spec>) instead of fetching + scanning the wrong
+    # version.
+    return _NpmRangeUnsatisfiable()
 
 
 def _npm_range_matcher(spec: str):
@@ -596,12 +677,29 @@ def _resolve_requirements_txt(
     """
     session = _http_session()
     direct: list[tuple[str, "str | None | _PinFailed"]] = []
-    for raw in req_file.read_text(encoding="utf-8").splitlines():
+    # Join backslash-continued physical lines into logical lines the way pip
+    # splits a requirements file, then strip ``--hash`` options, BEFORE
+    # ``Requirement(line)`` parses the PEP 508 name@spec. Without this the
+    # canonical ``pip-compile`` / ``pip install --require-hashes`` pinned
+    # format (``name==1.0.0 --hash=sha256:...`` per logical line, the
+    # DevSecOps hashed-requirements workflow) raises ``InvalidRequirement``
+    # on every line and is swallowed by the ``except`` below → ZERO deps
+    # resolved → exit 0, a silent full-tree under-scan / false-clean.
+    raw_text = req_file.read_text(encoding="utf-8")
+    for raw in _join_continued_lines(raw_text).splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or line.startswith("-"):
             continue
         # Strip inline comments and environment markers handled by Requirement.
         line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        # Strip ``--hash`` / ``--hash=`` options (pip-compile /
+        # ``--require-hashes`` pinned output) so the PEP 508 name@spec parses
+        # — the hash tokens are not part of the requirement spec and break
+        # ``Requirement(line)``. Mirrors how ``--`` flag lines are already
+        # skipped above; extended to inline ``--hash`` tokens.
+        line = _strip_hash_options(line)
         if not line:
             continue
         try:
@@ -618,6 +716,56 @@ def _resolve_requirements_txt(
         target_env=target_env,
         marker_skipped=marker_skipped,
     )
+
+
+def _join_continued_lines(text: str) -> str:
+    """Join physical lines ending in a trailing ``\\`` into one logical line.
+
+    pip splits a requirements file this way: a line whose last non-space
+    character is ``\\`` continues onto the next physical line. ``pip-compile``
+    / ``pip install --generate-hashes`` emits one requirement per logical
+    line with its ``--hash`` options spread across several continued physical
+    lines; without reassembly the first physical line (``name==1.0.0 \\``)
+    still carries the dangling ``\\`` and breaks ``Requirement(line)``.
+    """
+    out: list[str] = []
+    buf = ""
+    for ln in text.splitlines():
+        stripped = ln.rstrip()
+        if stripped.endswith("\\"):
+            buf += stripped[:-1] + " "
+        else:
+            buf += ln
+            out.append(buf)
+            buf = ""
+    if buf:
+        out.append(buf)
+    return "\n".join(out)
+
+
+def _strip_hash_options(line: str) -> str:
+    """Remove ``--hash`` / ``--hash=`` options from a requirements line.
+
+    Handles both the ``--hash=sha256:...`` (equals) and ``--hash
+    sha256:...`` (space) forms pip emits under ``--require-hashes`` /
+    ``pip-compile``. The hash tokens are not valid PEP 508 and would make
+    ``Requirement(line)`` raise ``InvalidRequirement`` (dropping the dep).
+    """
+    out: list[str] = []
+    skip_next = False
+    for tok in line.split():
+        if skip_next:
+            skip_next = False
+            continue
+        if tok == "--hash":
+            # Space form: the NEXT token is the hash value.
+            skip_next = True
+            continue
+        if tok.startswith("--hash="):
+            # Equals form: the value is on the same token.
+            continue
+        out.append(tok)
+    return " ".join(out)
 
 
 def _pyproject_has_project_deps(pyproject: Path) -> bool:
