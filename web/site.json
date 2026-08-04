@@ -71,16 +71,18 @@
     },
     {
       "title": {
-        "zh": "拉不下来的包，不再静默“判”干净",
-        "en": "A dep that can't be fetched is never silently scored clean"
+        "zh": "匹配不到版本、拉不下来、工作区包——覆盖报告都说真话",
+        "en": "No matching version, fetch failure, workspace package — the coverage report tells the truth"
       },
       "body": {
-        "zh": "拉不下来的包，不再静默判干净 —— 解析失败的依赖、网络拉取失败的 ~= 锁定版本，都老老实实记成「没扫到」，不会因为查不到就当你没问题。",
-        "en": "A package that can't be fetched is no longer silently judged clean — a dependency that fails to resolve, or a ~= pinned version whose lookup failed, is honestly recorded as 'not scanned', never waved through as 'looks fine' just because the lookup came back empty."
+        "zh": "一个 npm 范围（^/~ /x-range）匹配不到任何已发布版本，或 ~= 锁定版本解析失败，工具不会偷偷去扫 registry latest（一个你根本装不上的版本）然后报干净——而是记成「没扫到」。一个 404 / 被 yank 的包照实记成没扫到；monorepo 里工作区自身的包（apps/web、packages/foo）也不会被当成 npm 依赖去拉、再报成 version_not_found 误失败你的 CI。带 --hash 的 pip-compile 锁定文件也不再因为解析失败而漏扫整棵树。",
+        "en": "An npm range (^/~ /x-range) that matches no published version, or a ~= pin whose lookup failed, is never silently scanned at the registry latest (a version you can't even install) and passed clean — it's recorded as 'not scanned'. A 404 / yanked package is recorded as not-scanned; a workspace's own package in a monorepo (apps/web, packages/foo) is never fetched as an npm dependency and reported as version_not_found to false-fail your CI. A pip-compile --hash-pinned requirements file no longer under-scans the whole tree from a parse failure."
       },
       "chips": [
-        "› 解析失败照实记",
-        "› 不静默判干净"
+        "› 范围无匹配不当干净",
+        "› 404/yank 照实记",
+        "› 工作区包不误报",
+        "› --hash 锁定不漏扫"
       ]
     },
     {
@@ -106,7 +108,7 @@
       "PyPI",
       "README",
       "docstring",
-      "MCP"
+      "summary"
     ]
   },
   "cta": {
@@ -115,8 +117,8 @@
       "en": "Install one command, block weaponized deps"
     },
     "sub": {
-      "zh": "开源（Apache-2.0）。hosted-CI 版本做 PR 拦截 + 每日 corpus 更新 + MCP server 扫描。",
-      "en": "Open source (Apache-2.0). The hosted-CI tier adds PR-blocking, daily corpus updates, and MCP-server scanning."
+      "zh": "开源（Apache-2.0）。本地跑，无账号、无模型、无推理成本。hosted-CI 版本做 PR 拦截与每日 corpus 更新。",
+      "en": "Open source (Apache-2.0). Runs locally — no account, no model, no inference cost. The hosted-CI tier adds PR-blocking and daily corpus updates."
     },
     "button": {
       "zh": "pipx install promptaudit",
@@ -129,5 +131,5 @@
       "en": "Dependency scanning for the Coding Agent era"
     }
   },
-  "content_version": "v0.6.0"
+  "content_version": "v0.8.0"
 }
