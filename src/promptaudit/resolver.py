@@ -283,6 +283,22 @@ def _walk_lockfile_v2(packages: dict, root_name: str) -> Iterable[ResolvedPackag
         if path_key == "":
             # The root project itself; not a dependency.
             continue
+        if not path_key.startswith("node_modules/"):
+            # In an npm v2/v3 lockfile, workspace / local packages are keyed
+            # by their RELATIVE directory path (e.g. "apps/web",
+            # "packages/foo"), NOT by a "node_modules/..." path. Such entries
+            # carry a `version` (from the workspace's package.json) and no
+            # dev/peer/optional flag, so they pass every guard below and would
+            # be yielded as ResolvedPackage(name="apps/web", ...). The fetcher
+            # then GETs registry.npmjs.org/apps/web/<ver> which 404s,
+            # surfacing the workspace as a bogus version_not_found
+            # UnscannedPackage with a nonsense package name; under
+            # --fail-on-fetch-error this false-fails the CI gate on every
+            # workspace monorepo (the dominant modern npm layout) and the
+            # bogus name corrupts the terminal/JSON report. Workspace/local
+            # packages are not registry-fetchable — skip them. (The v1 walker
+            # is unaffected: it walks nested `dependencies`, not path keys.)
+            continue
         if meta.get("dev") or meta.get("peer") or meta.get("optional"):
             # v0.1 scope: runtime deps only. devDeps are not pulled at install.
             continue
@@ -483,8 +499,17 @@ def _resolve_npm_max_satisfying(
 
     versions = list((doc.get("versions") or {}).keys())
     if not versions:
-        # Fall back to the dist-tag map if the doc has no versions block.
-        return (doc.get("dist-tags") or {}).get("latest")
+        # An empty `versions` block is the same wrong-version / false-clean
+        # class as an empty `candidates` list below: dist-tags.latest is
+        # necessarily OUTSIDE the requested range (else it would itself be a
+        # candidate), so auditing it scans a version the project cannot even
+        # install and false-passes the CI gate. Return the
+        # _NpmRangeUnsatisfiable sentinel (NOT dist-tags.latest) so the
+        # no-lockfile walk surfaces range_unsatisfiable:<spec> as a coverage
+        # gap instead of fetching + scanning the out-of-range latest. The
+        # v0.7.0 fix-npm-range-no-match-resolves-latest closed only the
+        # empty-candidates path; this empty-versions sibling was missed.
+        return _NpmRangeUnsatisfiable()
 
     matcher = _npm_range_matcher(spec)
     candidates: list[Version] = []
