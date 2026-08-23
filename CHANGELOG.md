@@ -4,6 +4,79 @@ All notable changes to PromptAudit are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] — 2026-08-23
+
+Correctness-fix release continuing the v0.2.0–v0.8.0 silent-false-negative
+hardening cadence. Three resolver regressions on the tool's canonical
+supply-chain surfaces (a yanked PyPI pinned version, a crafted npm packument,
+and a pip-tools `-r` include) — each silently dropped a dep, crashed the CLI,
+or under-scanned a partial tree. Each fix ships with an adversarial regression
+test that is red on the v0.8.0 baseline.
+
+### Fixed
+
+- **A 404 / unreachable PyPI release-doc fetch in the transitive walk no longer
+  silently drops the dep.** `_walk_pypi` did `info = _fetch_pypi_release(...)`
+  then `if info is None: continue` BEFORE the `yield ResolvedPackage`, so a
+  directly-pinned (`foo==1.0.0`) or transitively-required PyPI dep whose
+  version was yanked / unpublished / hit a transient registry blip — itself a
+  supply-chain red flag — vanished from BOTH `packages` and `marker_skipped`
+  and never reached the fetcher (whose v0.3.0 `fix-404-empty-corpus-silent-clean`
+  would otherwise surface it as `version_not_found` unscanned): zero findings,
+  zero unscanned signal, exit 0. This is the PyPI-side analog of v0.7.0's
+  `fix-npm-no-lockfile-404-silent-drop` (which closed the npm no-lockfile
+  resolve-time 404 path but missed this sibling — the npm walk yields the
+  parent BEFORE its dependency fetch so a 404 is caught downstream, whereas
+  the PyPI walk 404-checks and `continue`s BEFORE yielding). A 404 / over-cap
+  / unparseable release doc (and a reachable but malformed doc with no
+  `version` field) is now surfaced as `pypi_release_not_found` via the existing
+  `marker_skipped` / `skipped_seen` plumbing so the CLI reports an
+  `UnscannedPackage` instead of exiting 0 clean.
+- **A crafted npm packument with a non-dict `versions` field no longer crashes
+  the CLI.** `_resolve_npm_max_satisfying` did `versions =
+  list((doc.get("versions") or {}).keys())` whose `or {}` only guards a
+  falsy / absent `versions`; a crafted / malformed packument (the tool's
+  canonical supply-chain surface) with a truthy non-dict `versions` (`["a","b"]`
+  or `42`) made `(non_dict or {})` return the non-dict unchanged, and
+  `non_dict.keys()` raised `AttributeError` — crashing the CLI on a routine
+  `scan .` of a no-lockfile npm project. The v0.8.0 `fix-npm-range-empty-
+  versions-falls-to-latest` added `if not versions:` (False for a non-empty
+  list, so the non-dict sibling slipped past). A non-dict `versions` is now
+  guarded with `isinstance(..., dict)` and treated as the empty-versions
+  coverage gap (the same `_NpmRangeUnsatisfiable` sentinel the empty-versions
+  path returns) — never a crash. The same `isinstance` guard is applied to
+  `dist-tags` in `_resolve_npm_dist_tag` and `releases` in
+  `_resolve_pypi_max_satisfying` for parity.
+- **`-r` / `--requirements` include directives in `requirements.txt` are now
+  resolved so the included deps are scanned.** `_resolve_requirements_txt`
+  skipped every line starting with `-`, so a `-r base.txt` /
+  `--requirements base.txt` include (the common pip-tools / multi-env pattern)
+  silently dropped the included file's deps from `packages`,
+  `packages_with_coverage`'s `missing`, and `marker_skipped` — a silent
+  partial-tree under-scan that exited 0 clean if the top-level deps happened to
+  be clean, on the exact requirements-parsing surface v0.7.0's
+  `fix-requirements-hashes-silent-drop` hardened (the `--hash` strip and the
+  `-r` skip lived in the same loop). `-r` / `--requirements` targets are now
+  resolved relative to the current file's directory and recursed (with a
+  `visited` set bounding include cycles), so the included deps ARE scanned.
+  `-c` / `--constraints` includes (pip does not install constraint files as
+  deps — recursing them would scan non-dependencies) and any missing `-r`
+  target are surfaced as a coverage marker (`<kind>_include_not_resolved:<file>`)
+  rather than dropped silently.
+
+### Tests
+
+- `tests/test_v090_fixes.py` (new): six adversarial regression tests, each red
+  on the v0.8.0 baseline. (1) a 404 PyPI release-doc fetch asserts the dep
+  surfaces as `pypi_release_not_found` in `marker_skipped` (red: `marker_skipped`
+  empty). (2) a packument with `"versions": ["a","b"]` asserts no `AttributeError`
+  and a `range_unsatisfiable` coverage gap (red: crashes). (3,4) the `dist-tags`
+  and `releases` sibling sites assert no crash on a non-dict field (red:
+  `AttributeError` / `TypeError`). (5) a `-r base.txt` include asserts the
+  included file's dep IS scanned (red: absent). (6) an `a -> b -> a` include
+  cycle asserts both deps are scanned once with no unbounded recursion (red:
+  both absent).
+
 ## [0.6.0] — 2026-07-25
 
 Correctness-fix release continuing the v0.2.0–v0.5.0 cadence. Three
@@ -307,6 +380,7 @@ report aimed at gating CI.
   ecosystem per minor version.
 - No MCP-server scan mode yet — `awesome-mcp-servers` ingestion is m4.
 
+[0.9.0]: https://github.com/SuperMarioYL/promptaudit/releases/tag/v0.9.0
 [0.4.0]: https://github.com/SuperMarioYL/promptaudit/releases/tag/v0.4.0
 [0.3.0]: https://github.com/SuperMarioYL/promptaudit/releases/tag/v0.3.0
 [0.2.0]: https://github.com/SuperMarioYL/promptaudit/releases/tag/v0.2.0

@@ -481,7 +481,14 @@ def _resolve_npm_dist_tag(session: requests.Session, name: str, spec: str) -> st
         )
         if doc is None:
             return None
-        tags = doc.get("dist-tags", {})
+        tags = doc.get("dist-tags")
+        if not isinstance(tags, dict):
+            # fix-npm-registry-versions-non-dict-crash (sibling site): a
+            # crafted packument with a non-dict ``dist-tags`` (list/int/str)
+            # would crash on ``tags.get(...)`` below. Treat it as an unusable
+            # doc — return ``None`` (surfaced as ``npm_doc_not_found`` by the
+            # no-lockfile walk), mirroring the ``doc is None`` path above.
+            return None
         return tags.get(spec or "latest")
     # Anything else is a range/version-ish spec — resolve max-satisfying.
     return _resolve_npm_max_satisfying(session, name, spec)
@@ -497,7 +504,20 @@ def _resolve_npm_max_satisfying(
     if doc is None:
         return None
 
-    versions = list((doc.get("versions") or {}).keys())
+    versions_raw = doc.get("versions")
+    if not isinstance(versions_raw, dict):
+        # fix-npm-registry-versions-non-dict-crash: a crafted / malformed npm
+        # packument (the tool's canonical supply-chain surface) with a truthy
+        # non-dict ``versions`` field (e.g. ``"versions": ["a","b"]`` or
+        # ``"versions": 42``) would reach ``.keys()`` below and raise
+        # ``AttributeError`` — crashing the CLI on a routine ``scan .``. The
+        # v0.8.0 ``if not versions`` guard only catches a falsy / absent
+        # ``versions`` (it is False for a non-empty list, so the non-dict
+        # sibling slipped past). Treat a non-dict ``versions`` as the
+        # empty-versions coverage gap (the same sentinel returned one line
+        # below) — never a crash.
+        return _NpmRangeUnsatisfiable()
+    versions = list(versions_raw.keys())
     if not versions:
         # An empty `versions` block is the same wrong-version / false-clean
         # class as an empty `candidates` list below: dist-tags.latest is
@@ -685,35 +705,127 @@ def _resolve_poetry_lock(lockfile: Path) -> Iterable[ResolvedPackage]:
             )
 
 
-def _resolve_requirements_txt(
-    req_file: Path,
-    *,
-    target_env: dict[str, str] | None = None,
-    marker_skipped: list[MarkerSkipped] | None = None,
-) -> Iterable[ResolvedPackage]:
-    """Parse pinned ``requirements.txt`` entries and walk PyPI transitively.
+_REQUIREMENTS_INCLUDE_OPTS = {
+    "-r": "requirements",
+    "--requirements": "requirements",
+    "-c": "constraints",
+    "--constraints": "constraints",
+}
 
-    ``name==version`` and ``name===version`` are exact pins (returned as-is).
-    ``name~=version`` is a compatible-release pin resolved to the highest PyPI
-    release satisfying the full specifier (so we audit the version a real
-    install picks, not the registry latest). Anything looser (``>=``, ``<``,
-    ranges, wildcards, bare names) is left unpinned and sent through the PyPI
-    walk to resolve to the latest release.
+
+def _requirements_include_path(
+    line: str, base_dir: Path
+) -> tuple[Path, str] | None:
+    """If ``line`` is a ``-r``/``--requirements`` (or ``-c``/``--constraints``)
+    include directive, return ``(resolved_path, kind)``; else ``None``.
+
+    ``kind`` is ``"requirements"`` (a real dep include — pip installs the
+    listed deps, so we recurse and scan them) or ``"constraints"`` (pip does
+    NOT install constraint files as deps — they only bound versions, so
+    recursing them would scan packages the project does not depend on; we
+    surface them as a coverage marker instead). Supports both the
+    ``-r base.txt`` (space) and ``--requirements=base.txt`` (equals) forms;
+    the path resolves relative to ``base_dir`` (the current file's directory)
+    the way pip resolves includes.
     """
-    session = _http_session()
-    direct: list[tuple[str, "str | None | _PinFailed"]] = []
-    # Join backslash-continued physical lines into logical lines the way pip
-    # splits a requirements file, then strip ``--hash`` options, BEFORE
-    # ``Requirement(line)`` parses the PEP 508 name@spec. Without this the
-    # canonical ``pip-compile`` / ``pip install --require-hashes`` pinned
-    # format (``name==1.0.0 --hash=sha256:...`` per logical line, the
-    # DevSecOps hashed-requirements workflow) raises ``InvalidRequirement``
-    # on every line and is swallowed by the ``except`` below → ZERO deps
-    # resolved → exit 0, a silent full-tree under-scan / false-clean.
+    tokens = line.split()
+    if not tokens:
+        return None
+    head = tokens[0]
+    # Equals form: ``--requirements=base.txt``.
+    if "=" in head:
+        key, _, val = head.partition("=")
+        kind = _REQUIREMENTS_INCLUDE_OPTS.get(key)
+        if kind and val:
+            return (base_dir / val).resolve(), kind
+        return None
+    kind = _REQUIREMENTS_INCLUDE_OPTS.get(head)
+    if not kind:
+        return None
+    # Space form: ``-r base.txt`` (the path is the next token).
+    if len(tokens) >= 2 and tokens[1]:
+        return (base_dir / tokens[1]).resolve(), kind
+    return None
+
+
+def _collect_requirements_deps(
+    req_file: Path,
+    session: requests.Session,
+    *,
+    direct: list[tuple[str, "str | None | _PinFailed"]],
+    marker_skipped: list[MarkerSkipped] | None,
+    visited: set[Path],
+    skipped_seen: set[tuple[str, str]],
+) -> None:
+    """Parse pinned entries from ``req_file`` into ``direct``, recursing into
+    ``-r``/``--requirements`` include files so the included deps are scanned.
+
+    fix-requirements-r-include-silent-drop: the v0.8.0 parse loop skipped
+    every line starting with ``-``, so a hand-maintained ``requirements.txt``
+    doing ``-r base.txt`` (the common pip-tools / multi-env pattern) silently
+    dropped every dep listed in ``base.txt`` from ``packages``,
+    ``packages_with_coverage``'s ``missing``, and ``marker_skipped`` — a
+    silent partial-tree false-clean (exit 0 if the top-level deps happen to
+    be clean). ``-r``/``--requirements`` targets are recursed (pip installs
+    them as real deps); ``visited`` (resolved paths) bounds include cycles
+    (``-r a.txt`` inside ``a.txt``). ``-c``/``--constraints`` includes and any
+    missing ``-r`` target are surfaced as a coverage marker
+    (``<kind>_include_not_resolved:<file>``) rather than recursed: pip does
+    not install constraints as deps (recursing them would scan non-deps), and a
+    missing include can't be scanned. Joining backslash-continued lines and
+    stripping inline ``--hash`` options happens BEFORE ``Requirement(line)``
+    parses the PEP 508 name@spec (the v0.7.0 fix-requirements-hashes-silent-drop
+    plumbing), so the canonical pip-compile / ``--require-hashes`` pinned
+    format still parses.
+    """
+    real = req_file.resolve()
+    if real in visited:
+        return
+    visited.add(real)
+    base_dir = real.parent
     raw_text = req_file.read_text(encoding="utf-8")
     for raw in _join_continued_lines(raw_text).splitlines():
         line = raw.strip()
-        if not line or line.startswith("#") or line.startswith("-"):
+        if not line or line.startswith("#"):
+            continue
+        inc = _requirements_include_path(line, base_dir)
+        if inc is not None:
+            inc_path, kind = inc
+            if kind == "requirements" and inc_path.exists():
+                _collect_requirements_deps(
+                    inc_path,
+                    session,
+                    direct=direct,
+                    marker_skipped=marker_skipped,
+                    visited=visited,
+                    skipped_seen=skipped_seen,
+                )
+            elif marker_skipped is not None:
+                # A constraints include (not a dep — recursing would scan
+                # packages the project does not depend on) OR a missing
+                # ``-r`` target (nothing to recurse into). Surface it as a
+                # coverage gap instead of silently dropping the directive.
+                reason = (
+                    "constraints_include_not_resolved"
+                    if kind == "constraints"
+                    else "requirements_include_not_resolved"
+                )
+                marker = f"{reason}:{inc_path.name}"
+                key = (inc_path.name, marker)
+                if key not in skipped_seen:
+                    skipped_seen.add(key)
+                    marker_skipped.append(
+                        MarkerSkipped(
+                            name=inc_path.name,
+                            ecosystem="pypi",
+                            marker=marker,
+                            via_path=("<root>",),
+                        )
+                    )
+            continue
+        if line.startswith("-"):
+            # Other ``--`` config directives (``--index-url``) and editable /
+            # local specs (``-e .``) are not fetchable from PyPI by version.
             continue
         # Strip inline comments and environment markers handled by Requirement.
         line = line.split("#", 1)[0].strip()
@@ -731,9 +843,38 @@ def _resolve_requirements_txt(
             req = Requirement(line)
         except Exception:
             continue
-        version = _pin_from_specifier(req, session)
-        direct.append((canonicalize_name(req.name), version))
+        direct.append((canonicalize_name(req.name), _pin_from_specifier(req, session)))
 
+
+def _resolve_requirements_txt(
+    req_file: Path,
+    *,
+    target_env: dict[str, str] | None = None,
+    marker_skipped: list[MarkerSkipped] | None = None,
+) -> Iterable[ResolvedPackage]:
+    """Parse pinned ``requirements.txt`` entries and walk PyPI transitively.
+
+    ``name==version`` and ``name===version`` are exact pins (returned as-is).
+    ``name~=version`` is a compatible-release pin resolved to the highest PyPI
+    release satisfying the full specifier (so we audit the version a real
+    install picks, not the registry latest). Anything looser (``>=``, ``<``,
+    ranges, wildcards, bare names) is left unpinned and sent through the PyPI
+    walk to resolve to the latest release.
+
+    ``-r``/``--requirements`` include directives are recursed (with a cycle
+    guard) so an included file's deps are scanned, not silently dropped — see
+    ``_collect_requirements_deps`` (fix-requirements-r-include-silent-drop).
+    """
+    session = _http_session()
+    direct: list[tuple[str, "str | None | _PinFailed"]] = []
+    _collect_requirements_deps(
+        req_file,
+        session,
+        direct=direct,
+        marker_skipped=marker_skipped,
+        visited=set(),
+        skipped_seen=set(),
+    )
     yield from _walk_pypi(
         direct,
         root_name="<root>",
@@ -886,7 +1027,14 @@ def _resolve_pypi_max_satisfying(
     if doc is None:
         return _PinFailed()
 
-    releases = doc.get("releases") or {}
+    releases = doc.get("releases")
+    if not isinstance(releases, dict):
+        # fix-npm-registry-versions-non-dict-crash (sibling site): a crafted
+        # PyPI doc with a non-dict ``releases`` (e.g. ``"releases": 42``) would
+        # crash on ``for ver_str in releases`` (non-iterable) below, or
+        # mis-resolve a list/str as version tags. Treat it as the
+        # ``_PinFailed`` coverage gap (mirrors the ``doc is None`` path above).
+        return _PinFailed()
     candidates: list[Version] = []
     for ver_str in releases:
         try:
@@ -948,10 +1096,41 @@ def _walk_pypi(
                     )
             continue
         info = _fetch_pypi_release(session, name, version)
-        if info is None:
-            continue
-        resolved_version = info.get("version") or version
-        if not resolved_version:
+        resolved_version = (info.get("version") or version) if info is not None else None
+        if info is None or not resolved_version:
+            # fix-pypi-walk-404-silent-drop: a 404 / over-cap / unparseable
+            # release-doc fetch (info is None) — or a reachable but malformed
+            # doc with no ``version`` field (not resolved_version) — must NOT
+            # vanish from BOTH ``packages`` and ``marker_skipped`` before the
+            # ``yield`` below. A directly-pinned (``foo==1.0.0``) or
+            # transitively-required PyPI dep whose version was yanked /
+            # unpublished / hit a transient registry blip is itself a
+            # supply-chain red flag, and silently dropping it (the v0.8.0
+            # ``if info is None: continue``) leaves zero findings AND zero
+            # unscanned signal — exit 0 clean. This is the PyPI-side analog
+            # of v0.7.0's ``fix-npm-no-lockfile-404-silent-drop`` (which
+            # closed the npm no-lockfile resolve-time 404 path but missed
+            # this sibling): the npm walk yields the parent BEFORE its
+            # dependency fetch, so a 404 there is caught downstream, whereas
+            # the PyPI walk 404-checks and ``continue``s BEFORE yielding, so
+            # nothing downstream catches it. Surface it as a coverage gap
+            # (``pypi_release_not_found`` via the existing marker_skipped /
+            # skipped_seen plumbing) so the CLI reports an UnscannedPackage
+            # instead of exiting 0 clean — mirrors the ``_PinFailed`` handling
+            # above. The ``not resolved_version`` branch is covered by the same
+            # marker (a malformed doc with no ``version``).
+            if marker_skipped is not None:
+                skip_key = (name, "pypi_release_not_found")
+                if skip_key not in skipped_seen:
+                    skipped_seen.add(skip_key)
+                    marker_skipped.append(
+                        MarkerSkipped(
+                            name=name,
+                            ecosystem="pypi",
+                            marker="pypi_release_not_found",
+                            via_path=(*via, name),
+                        )
+                    )
             continue
         key = (name, resolved_version)
         if key in visited:

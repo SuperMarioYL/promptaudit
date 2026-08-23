@@ -131,5 +131,6 @@
       "en": "Dependency scanning for the Coding Agent era"
     }
   },
-  "content_version": "v0.8.0"
+  "content_version": "v0.9.0",
+  "generated_at": "2026-08-23"
 }
