@@ -675,7 +675,19 @@ def _fetch_npm_dependencies(
     )
     if doc is None:
         return {}
-    return doc.get("dependencies", {}) or {}
+    deps = doc.get("dependencies")
+    if not isinstance(deps, dict):
+        # fix-registry-nondict-dependencies-and-info (sibling site): a crafted /
+        # malformed npm packument (the tool's canonical supply-chain surface)
+        # with a truthy non-dict `dependencies` (list/int/str) would reach
+        # `.items()` in the caller `_resolve_npm_package_json` and raise
+        # AttributeError, crashing the CLI on a routine `scan .` of a no-lockfile
+        # npm project. The v0.9.0 fix-npm-registry-versions-non-dict-crash
+        # guarded `versions`/`dist-tags`/`releases` but missed this site. Treat a
+        # non-dict `dependencies` as "no transitive deps" (the same empty path the
+        # falsy guard above returns) — never a crash.
+        return {}
+    return deps
 
 
 # ---------- PyPI ---------------------------------------------------------------
@@ -1183,7 +1195,20 @@ def _fetch_pypi_release(
     doc = _get_registry_json(session, url, MAX_REGISTRY_JSON_BYTES)
     if doc is None:
         return None
-    return doc.get("info", {})
+    info = doc.get("info")
+    if not isinstance(info, dict):
+        # fix-registry-nondict-dependencies-and-info (sibling site): a crafted /
+        # malformed PyPI release doc with a truthy non-dict `info` (list/int)
+        # would reach `info.get("version")` in `_walk_pypi` and raise
+        # AttributeError (the `info is not None` check is True for a truthy
+        # non-dict, so it does NOT take the safe `else None` branch), crashing the
+        # CLI on a routine `scan .`. The v0.9.0 fix-npm-registry-versions-non-dict-crash
+        # guarded `versions`/`dist-tags`/`releases` but missed this site. Treat a
+        # non-dict `info` as the same coverage gap `doc is None` returns above
+        # (surfaced as `pypi_release_not_found` by the v0.9.0
+        # fix-pypi-walk-404-silent-drop plumbing) — never a crash.
+        return None
+    return info
 
 
 def _marker_applies(

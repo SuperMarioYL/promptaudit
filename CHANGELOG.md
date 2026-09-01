@@ -4,6 +4,43 @@ All notable changes to PromptAudit are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] — 2026-09-01
+
+Correctness-fix release continuing the v0.9.0 non-dict-hardening class. The
+v0.9.0 `fix-npm-registry-versions-non-dict-crash` added `isinstance(..., dict)`
+guards at three sites (`versions`, `dist-tags`, `releases`) but two
+structurally identical sibling sites that consume a registry-doc field via
+`.get(...)` / `.items()` on a truthy non-dict were missed — both reproduced
+against shipped v0.9.0 as an unhandled `AttributeError` (the resolver only
+catches `ResolverError`), crashing the CLI on a routine `scan .` of a project
+whose resolved dep has a crafted or malformed registry document (the tool's
+canonical supply-chain surface — a registry GET happens on every scan). Each
+fix ships with an adversarial regression test that is red on the v0.9.0
+baseline.
+
+### Fixed
+
+- **A non-dict `dependencies` or `info` field in an npm/PyPI registry document
+  no longer crashes the resolver.** `_fetch_npm_dependencies` did
+  `return doc.get("dependencies", {}) or {}` whose `or {}` only guards a
+  falsy/absent `dependencies`, so a crafted npm packument with a truthy non-dict
+  `dependencies` (e.g. `["a","b"]`) made `.items()` in the caller
+  `_resolve_npm_package_json` raise `AttributeError` on the no-lockfile
+  transitive walk. `_fetch_pypi_release` did `return doc.get("info", {})` whose
+  `{}` default only applies when the key is ABSENT, so a crafted PyPI release
+  doc with a truthy non-dict `info` made `info.get("version")` in `_walk_pypi`
+  raise `AttributeError` (the `info is not None` check is True for a truthy
+  non-dict, so it does NOT take the safe `else None` branch). Both are the exact
+  non-dict crash class v0.9.0 began closing, and both slipped past the v0.9.0
+  fix because its `isinstance` guard was applied only to the three fields its
+  bug-hunt enumerated, not to the other `.get()` / `.items()` registry-doc
+  consumption sites. A non-dict `dependencies` now returns `{}` (no transitive
+  children, the same empty path the falsy guard already returns); a non-dict
+  `info` returns `None`, which `_walk_pypi` surfaces as a
+  `pypi_release_not_found` coverage gap (via the v0.9.0
+  `fix-pypi-walk-404-silent-drop` plumbing) — never a crash. The guard is
+  identical in shape to the three v0.9.0 sites.
+
 ## [0.9.0] — 2026-08-23
 
 Correctness-fix release continuing the v0.2.0–v0.8.0 silent-false-negative
@@ -380,6 +417,7 @@ report aimed at gating CI.
   ecosystem per minor version.
 - No MCP-server scan mode yet — `awesome-mcp-servers` ingestion is m4.
 
+[0.10.0]: https://github.com/SuperMarioYL/promptaudit/releases/tag/v0.10.0
 [0.9.0]: https://github.com/SuperMarioYL/promptaudit/releases/tag/v0.9.0
 [0.4.0]: https://github.com/SuperMarioYL/promptaudit/releases/tag/v0.4.0
 [0.3.0]: https://github.com/SuperMarioYL/promptaudit/releases/tag/v0.3.0

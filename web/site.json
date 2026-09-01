@@ -75,8 +75,8 @@
         "en": "No matching version, fetch failure, workspace package — the coverage report tells the truth"
       },
       "body": {
-        "zh": "一个 npm 范围（^/~ /x-range）匹配不到任何已发布版本，或 ~= 锁定版本解析失败，工具不会偷偷去扫 registry latest（一个你根本装不上的版本）然后报干净——而是记成「没扫到」。一个 404 / 被 yank 的包照实记成没扫到；monorepo 里工作区自身的包（apps/web、packages/foo）也不会被当成 npm 依赖去拉、再报成 version_not_found 误失败你的 CI。带 --hash 的 pip-compile 锁定文件也不再因为解析失败而漏扫整棵树。",
-        "en": "An npm range (^/~ /x-range) that matches no published version, or a ~= pin whose lookup failed, is never silently scanned at the registry latest (a version you can't even install) and passed clean — it's recorded as 'not scanned'. A 404 / yanked package is recorded as not-scanned; a workspace's own package in a monorepo (apps/web, packages/foo) is never fetched as an npm dependency and reported as version_not_found to false-fail your CI. A pip-compile --hash-pinned requirements file no longer under-scans the whole tree from a parse failure."
+        "zh": "一个 npm 范围（^/~ /x-range）匹配不到任何已发布版本，或 ~= 锁定版本解析失败，工具不会偷偷去扫 registry latest（一个你根本装不上的版本）然后报干净——而是记成「没扫到」。一个 404 / 被 yank 的包照实记成没扫到；monorepo 里工作区自身的包（apps/web、packages/foo）也不会被当成 npm 依赖去拉、再报成 version_not_found 误失败你的 CI。带 --hash 的 pip-compile 锁定文件也不再因为解析失败而漏扫整棵树。一个被篡改或畸形的 registry 文档（versions / dist-tags / releases / dependencies / info 字段是非字典的非法值）会降级成覆盖率缺口，而不是让扫描器崩溃。",
+        "en": "An npm range (^/~ /x-range) that matches no published version, or a ~= pin whose lookup failed, is never silently scanned at the registry latest (a version you can't even install) and passed clean — it's recorded as 'not scanned'. A 404 / yanked package is recorded as not-scanned; a workspace's own package in a monorepo (apps/web, packages/foo) is never fetched as an npm dependency and reported as version_not_found to false-fail your CI. A pip-compile --hash-pinned requirements file no longer under-scans the whole tree from a parse failure. A crafted or malformed registry document (a truthy non-dict versions / dist-tags / releases / dependencies / info field) degrades to a coverage gap instead of crashing the scanner."
       },
       "chips": [
         "› 范围无匹配不当干净",
@@ -131,6 +131,6 @@
       "en": "Dependency scanning for the Coding Agent era"
     }
   },
-  "content_version": "v0.9.0",
-  "generated_at": "2026-08-23"
+  "content_version": "v0.10.0",
+  "generated_at": "2026-09-01"
 }

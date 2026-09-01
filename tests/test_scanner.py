@@ -1124,7 +1124,11 @@ def test_user_agent_carries_live_version_and_real_repo_slug():
     assert "SuperMarioYL/promptaudit" in USER_AGENT, USER_AGENT
     # The stale slug must be gone for good.
     assert "supermario-leo" not in USER_AGENT, USER_AGENT
-    assert "promptaudit/0.1" not in USER_AGENT, USER_AGENT
+    # The trailing space anchors the stale frozen "0.1" version (the real UA
+    # format is "promptaudit/{version} (+...)"), so "promptaudit/0.1 " matches
+    # the stale "0.1" but NOT a legitimate "0.10.0"/"0.1.5" (those have a digit,
+    # not a space, after "0.1") — the bare substring would false-fail on 0.10.x.
+    assert "promptaudit/0.1 " not in USER_AGENT, USER_AGENT
 
 
 def test_waitlist_url_points_at_real_repo():
