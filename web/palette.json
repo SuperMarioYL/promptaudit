@@ -1,0 +1,38 @@
+{
+  "mode": "auto",
+  "id": "568de6-7d6ae7-ace3f6-8f528d085ea1",
+  "identity": "https://github.com/supermarioyl/promptaudit",
+  "primary": "#568de6",
+  "secondary": "#7d6ae7",
+  "highlight": "#ace3f6",
+  "dark": {
+    "bg": "#050912",
+    "panel": "#0c121f",
+    "code": "#0a101d",
+    "ink": "#eef9fd",
+    "muted": "#95a7c4",
+    "line": "#172641",
+    "primary": "#568de6",
+    "secondary": "#7d6ae7",
+    "highlight": "#ace3f6",
+    "accent": "#568de6",
+    "buttonStart": "#4876c1",
+    "buttonEnd": "#7764db",
+    "buttonText": "#ffffff"
+  },
+  "light": {
+    "bg": "#f9fbfe",
+    "panel": "#f7f9fe",
+    "code": "#f3f7fd",
+    "ink": "#131d30",
+    "muted": "#556988",
+    "line": "#cbdcf7",
+    "primary": "#4571b9",
+    "secondary": "#7260d2",
+    "highlight": "#5a7680",
+    "accent": "#4571b9",
+    "buttonStart": "#4876c1",
+    "buttonEnd": "#7764db",
+    "buttonText": "#ffffff"
+  }
+}

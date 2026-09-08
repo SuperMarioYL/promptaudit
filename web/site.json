@@ -1,136 +1,215 @@
 {
-  "schema": 1,
+  "schema": 3,
   "name": "promptaudit",
   "github": "https://github.com/SuperMarioYL/promptaudit",
   "host": "promptaudit.lei6393.com",
+  "palette": "auto",
   "lang": {
-    "primary": "zh",
+    "primary": "en",
     "toggle": true
   },
-  "accent": [
-    "#e6a144",
-    "#f59e0b",
-    "#7c2d12"
-  ],
+  "meta": {
+    "visual_style": "neon-particle",
+    "demo_source": "docs/demo-results.json"
+  },
   "hero": {
-    "eyebrow": {
-      "zh": "扫依赖树 · 抓注入 · 护住 Agent",
-      "en": "Scan deps · Catch injection · Shield your agent"
-    },
     "headline": {
-      "zh": "一条命令\n扫出依赖里瞄向 Coding Agent 的注入指令",
-      "en": "One command catches the\nprompt-injection hiding in your dependencies"
+      "en": "Inspect dependency text before an agent treats it as instruction.",
+      "zh": "在 Agent 将依赖文本当指令前先检查它。"
     },
     "sub": {
-      "zh": "解析你的 npm + PyPI 依赖树，抓取每个包的 README 与文档文本，用一套经过实战沉淀的注入指令规则集逐条比对 —— 命中即报文件、行号、片段、严重级别。jqwik 事件的武器化 README 会被原样标红报出。",
-      "en": "Resolves your npm + PyPI dep tree, pulls each package's README and doc text, matches a battle-tested injection-payload rule set, and reports file, line, snippet, and severity on every hit. The jqwik incident's weaponized README is flagged red verbatim."
+      "en": "PromptAudit resolves supported dependency inputs, gathers package text, and applies a curated rule corpus to identify suspicious instruction patterns.",
+      "zh": "PromptAudit 解析支持的依赖输入、收集包文本，并应用规则语料识别可疑指令模式。"
     },
-    "command": "promptaudit scan .",
-    "cta": {
-      "zh": "看它怎么扫",
-      "en": "See it scan"
-    },
-    "ctaGithub": {
-      "zh": "GitHub",
-      "en": "GitHub"
-    },
-    "scroll": {
-      "zh": "往下看原理",
-      "en": "How it works"
-    }
+    "href": "#quickstart"
   },
   "advantages": [
     {
       "title": {
-        "zh": "扫的是依赖真正塞进 Agent 上下文的文本",
-        "en": "Scans the text deps actually feed your agent — not version numbers"
+        "en": "Find recognizable payloads",
+        "zh": "发现可识别载荷"
       },
       "body": {
-        "zh": "扫的是依赖真正塞进 Agent 上下文的文本 —— README、文档、jqwik 这类会被原样加载进 prompt 的内容，逐文件命中即报。不管 sdist 有多少个成员文件，都从头扫到尾，不会在 48 个文件处静默截断。",
-        "en": "Scans the text deps actually inject into your Agent's context — README, docs, jqwik-style content that gets loaded verbatim into the prompt, reported per-file on hit. However many member files an sdist has, every one is scanned end to end — never silently truncated at 48."
-      },
-      "chips": [
-        "› 逐文件命中即报",
-        "› 多成员不截断"
-      ]
+        "en": "Rules target instructions aimed at coding agents.",
+        "zh": "规则针对面向编码 Agent 的指令。"
+      }
     },
     {
       "title": {
-        "zh": "命中的注入指令，直接给到文件、行号、片段",
-        "en": "Every hit points at the file, line, and snippet"
+        "en": "Keep package context",
+        "zh": "保留包上下文"
       },
       "body": {
-        "zh": "不是一句“发现 3 条可疑”——而是精确到哪个包、哪个文件、第几行、带上下文片段。critical 级别直接让 CI 失败，--json 输出给流水线机器消费。",
-        "en": "Not a vague '3 suspicious hits' — but exactly which package, which file, which line, with a context snippet. Critical findings fail CI, and --json hands the pipeline machine-readable output."
-      },
-      "chips": [
-        "› file:line:snippet",
-        "› critical → CI 失败",
-        "› --json 机器可读"
-      ]
+        "en": "Findings carry package and source locations.",
+        "zh": "结果携带包与源位置。"
+      }
     },
     {
       "title": {
-        "zh": "匹配不到版本、拉不下来、工作区包——覆盖报告都说真话",
-        "en": "No matching version, fetch failure, workspace package — the coverage report tells the truth"
+        "en": "Expose incomplete coverage",
+        "zh": "展示覆盖缺口"
       },
       "body": {
-        "zh": "一个 npm 范围（^/~ /x-range）匹配不到任何已发布版本，或 ~= 锁定版本解析失败，工具不会偷偷去扫 registry latest（一个你根本装不上的版本）然后报干净——而是记成「没扫到」。一个 404 / 被 yank 的包照实记成没扫到；monorepo 里工作区自身的包（apps/web、packages/foo）也不会被当成 npm 依赖去拉、再报成 version_not_found 误失败你的 CI。带 --hash 的 pip-compile 锁定文件也不再因为解析失败而漏扫整棵树。一个被篡改或畸形的 registry 文档（versions / dist-tags / releases / dependencies / info 字段是非字典的非法值）会降级成覆盖率缺口，而不是让扫描器崩溃。",
-        "en": "An npm range (^/~ /x-range) that matches no published version, or a ~= pin whose lookup failed, is never silently scanned at the registry latest (a version you can't even install) and passed clean — it's recorded as 'not scanned'. A 404 / yanked package is recorded as not-scanned; a workspace's own package in a monorepo (apps/web, packages/foo) is never fetched as an npm dependency and reported as version_not_found to false-fail your CI. A pip-compile --hash-pinned requirements file no longer under-scans the whole tree from a parse failure. A crafted or malformed registry document (a truthy non-dict versions / dist-tags / releases / dependencies / info field) degrades to a coverage gap instead of crashing the scanner."
+        "en": "Missing fetches remain visible to the operator.",
+        "zh": "缺失抓取结果仍对操作者可见。"
+      }
+    }
+  ],
+  "demo": {
+    "title": {
+      "en": "Run it on a complete example",
+      "zh": "运行完整示例"
+    },
+    "note": {
+      "en": "Scan tests/fixtures/jqwik_payload.txt as inert text using the production rule corpus, then print rule IDs, severity and line numbers.",
+      "zh": "用生产规则语料把 tests/fixtures/jqwik_payload.txt 作为惰性文本扫描，打印规则 ID、级别与行号。"
+    },
+    "source": "https://github.com/SuperMarioYL/promptaudit/blob/main/docs/demo-results.json",
+    "steps": [
+      {
+        "label": "Recorded run",
+        "body": "The shipped payload fixture is scanned as inert text through the production corpus. No package download or payload execution.",
+        "command": ".venv/bin/python examples/presentation-demo.py",
+        "output": "input: tests/fixtures/jqwik_payload.txt; text is scanned, never executed\n{\"rule_id\": \"PI-001-imperative-to-agent-delete\", \"severity\": \"critical\", \"line\": 22}\n{\"rule_id\": \"PI-003-ignore-previous-instructions\", \"severity\": \"critical\", \"line\": 31}\n{\"rule_id\": \"PI-101-second-person-to-ai\", \"severity\": \"high\", \"line\": 20}\n{\"rule_id\": \"PI-101-second-person-to-ai\", \"severity\": \"high\", \"line\": 22}\n{\"rule_id\": \"PI-102-role-override\", \"severity\": \"high\", \"line\": 22}\n{\"rule_id\": \"PI-105-conditional-on-agent-context\", \"severity\": \"high\", \"line\": 22}\n{\"rule_id\": \"PI-102-role-override\", \"severity\": \"high\", \"line\": 27}\n{\"rule_id\": \"PI-102-role-override\", \"severity\": \"high\", \"line\": 30}\n{\"rule_id\": \"PI-105-conditional-on-agent-context\", \"severity\": \"high\", \"line\": 30}\n{\"rule_id\": \"PI-202-do-not-tell-user\", \"severity\": \"medium\", \"line\": 26}\n{\"rule_id\": \"PI-201-jailbreak-preamble\", \"severity\": \"medium\", \"line\": 27}\n{\"rule_id\": \"PI-202-do-not-tell-user\", \"severity\": \"medium\", \"line\": 27}",
+        "image": "/assets/presentation/demo-0-light.svg",
+        "imageDark": "/assets/presentation/demo-0-dark.svg"
+      }
+    ]
+  },
+  "quickstart": {
+    "title": {
+      "en": "Try it locally",
+      "zh": "本地上手"
+    },
+    "body": {
+      "en": "Scan tests/fixtures/jqwik_payload.txt as inert text using the production rule corpus, then print rule IDs, severity and line numbers.",
+      "zh": "用生产规则语料把 tests/fixtures/jqwik_payload.txt 作为惰性文本扫描，打印规则 ID、级别与行号。"
+    },
+    "steps": [
+      {
+        "title": {
+          "en": "Install from source",
+          "zh": "从源码安装"
+        },
+        "code": "git clone https://github.com/SuperMarioYL/promptaudit.git\ncd promptaudit\nuv venv .venv\nuv pip install --python .venv/bin/python -e .\nsource .venv/bin/activate"
       },
-      "chips": [
-        "› 范围无匹配不当干净",
-        "› 404/yank 照实记",
-        "› 工作区包不误报",
-        "› --hash 锁定不漏扫"
-      ]
+      {
+        "title": {
+          "en": "Run the included example",
+          "zh": "运行随仓示例"
+        },
+        "code": ".venv/bin/python examples/presentation-demo.py"
+      }
+    ]
+  },
+  "limitations": [
+    {
+      "en": "Pattern scanning can miss unfamiliar attacks and can flag benign text. A clean scan is not proof that a package is safe.",
+      "zh": "模式扫描可能漏掉新攻击，也可能命中正常文本。无发现不证明包安全。"
     },
     {
-      "title": {
-        "zh": "审计你真正发布到的平台，不卡在扫描机本身",
-        "en": "Audit the platform you ship to — not the scanner's host"
-      },
-      "body": {
-        "zh": "Windows 专属依赖、旧 Python 版本依赖默认会被扫描机环境跳过。--target-platform windows / --target-python 3.8 让你从 Linux CI 审计 Windows 安装，跳过的依赖也会作为覆盖率缺口报出来。",
-        "en": "Windows-only deps and old-Python deps get skipped by the scanner host by default. --target-platform windows / --target-python 3.8 audit a Windows install from a Linux CI runner — and skipped deps still surface as coverage gaps."
-      },
-      "chips": [
-        "› --target-platform",
-        "› --target-python",
-        "› 跨平台覆盖"
-      ]
+      "en": "Normal scan may contact package registries. The recorded demo scans an included text fixture without fetching or executing a package.",
+      "zh": "普通 scan 可能访问包注册表；记录示例只扫描随仓文本，不抓取或执行包。"
+    },
+    {
+      "en": "Unresolved, skipped or unscanned packages are coverage gaps, not clean results.",
+      "zh": "未解析、跳过或未扫描的包是覆盖缺口，不是干净结果。"
     }
   ],
   "scene": {
-    "kind": "hub-nodes",
-    "nodes": [
-      "npm",
-      "PyPI",
-      "README",
-      "docstring",
-      "summary"
+    "kind": "neon-graph",
+    "fallback": "/assets/presentation/scene-dark.svg",
+    "fallbackLight": "/assets/presentation/scene-light.svg"
+  },
+  "story": {
+    "intro": {
+      "title": {
+        "en": "A concrete task",
+        "zh": "从实际任务出发"
+      },
+      "body": {
+        "en": "Dependency README and error text can be read by coding agents during normal work. A local text scan makes recognizable instruction payloads and unscanned packages visible before you rely on that material.",
+        "zh": "编码 Agent 在正常工作中可能读取依赖 README 和错误文本。文本扫描让可识别的指令载荷与未扫描包在被采用前显现。"
+      }
+    },
+    "sections": [
+      {
+        "title": {
+          "en": "Follow the operation",
+          "zh": "处理过程"
+        },
+        "body": {
+          "en": "The resolver enumerates packages, the fetcher writes bounded cached text, and scanner runs ecosystem-filtered patterns over README, summary and error strings. Findings retain rule, package, version and source location. The CLI also surfaces incomplete coverage.",
+          "zh": "解析器列举包，抓取器写入有边界的缓存文本，扫描器按生态筛选规则并匹配 README、简介与错误字符串。结果保留规则、包、版本和源位置；CLI 同时展示覆盖缺口。"
+        },
+        "image": {
+          "light": "/assets/presentation/process-light.svg",
+          "dark": "/assets/presentation/process-dark.svg",
+          "alt": {
+            "en": "Follow the operation",
+            "zh": "处理过程"
+          }
+        }
+      },
+      {
+        "title": {
+          "en": "How PromptAudit works",
+          "zh": "PromptAudit 的工作方式"
+        },
+        "body": {
+          "en": "The resolver enumerates packages, the fetcher writes bounded cached text, and scanner runs ecosystem-filtered patterns over README, summary and error strings. Findings retain rule, package, version and source location. The CLI also surfaces incomplete coverage.",
+          "zh": "解析器列举包，抓取器写入有边界的缓存文本，扫描器按生态筛选规则并匹配 README、简介与错误字符串。结果保留规则、包、版本和源位置；CLI 同时展示覆盖缺口。"
+        },
+        "image": {
+          "light": "/assets/presentation/architecture-light.svg",
+          "dark": "/assets/presentation/architecture-dark.svg",
+          "alt": {
+            "en": "How PromptAudit works",
+            "zh": "PromptAudit 的工作方式"
+          }
+        }
+      },
+      {
+        "title": {
+          "en": "Connect the pieces",
+          "zh": "输入与输出"
+        },
+        "body": {
+          "en": "The following routes are implemented in the source. Choose the input that matches your task and keep the resulting artifact with your project.",
+          "zh": "以下路径已有源码实现。按任务选择输入，并把生成的结果与项目一起保存。"
+        },
+        "image": {
+          "light": "/assets/presentation/integrations-light.svg",
+          "dark": "/assets/presentation/integrations-dark.svg",
+          "alt": {
+            "en": "Connect the pieces",
+            "zh": "输入与输出"
+          }
+        }
+      }
+    ],
+    "details": [
+      {
+        "title": {
+          "en": "Configuration",
+          "zh": "配置"
+        },
+        "body": {
+          "en": "Supported project inputs include package-lock.json, poetry.lock and requirements.txt. Inspect CLI coverage output when dependency resolution or fetch fails; target Python/platform settings are available for cross-environment resolution. Customize the corpus only with reproducible examples.",
+          "zh": "支持的项目输入包括 package-lock.json、poetry.lock 和 requirements.txt。解析或抓取失败时应检查 CLI 覆盖输出；目标 Python/platform 设置支持跨环境解析。规则定制应基于可复现示例。"
+        }
+      },
+      {
+        "title": {
+          "en": "Further use",
+          "zh": "进一步使用"
+        },
+        "body": {
+          "en": "The CLI exposes the following operations. Commands after the example use your own paths or identifiers.",
+          "zh": "CLI 提供以下操作。示例之外的命令需要替换成你的文件路径或标识。"
+        },
+        "code": "promptaudit scan .\npromptaudit scan . --json\npromptaudit rules"
+      }
     ]
-  },
-  "cta": {
-    "headline": {
-      "zh": "装一条命令，挡住武器化依赖",
-      "en": "Install one command, block weaponized deps"
-    },
-    "sub": {
-      "zh": "开源（Apache-2.0）。本地跑，无账号、无模型、无推理成本。hosted-CI 版本做 PR 拦截与每日 corpus 更新。",
-      "en": "Open source (Apache-2.0). Runs locally — no account, no model, no inference cost. The hosted-CI tier adds PR-blocking and daily corpus updates."
-    },
-    "button": {
-      "zh": "pipx install promptaudit",
-      "en": "pipx install promptaudit"
-    }
-  },
-  "footer": {
-    "tag": {
-      "zh": "为 Coding Agent 时代做的依赖扫描",
-      "en": "Dependency scanning for the Coding Agent era"
-    }
-  },
-  "content_version": "v0.10.0",
-  "generated_at": "2026-09-01"
+  }
 }

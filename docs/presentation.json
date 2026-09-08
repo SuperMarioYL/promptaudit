@@ -1,0 +1,78 @@
+{
+  "name": "promptaudit",
+  "tagline": "Inspect dependency text before an agent treats it as instruction.",
+  "architecture": {
+    "title": "How PromptAudit works",
+    "nodes": [
+      {
+        "title": "Dependency resolver",
+        "detail": "resolver.py"
+      },
+      {
+        "title": "Text cache",
+        "detail": "fetcher.py"
+      },
+      {
+        "title": "Rule scanner",
+        "detail": "scanner.py; rules.py"
+      },
+      {
+        "title": "Findings / coverage",
+        "detail": "report and CLI"
+      }
+    ],
+    "edges": [
+      [
+        0,
+        1
+      ],
+      [
+        1,
+        2
+      ],
+      [
+        2,
+        3
+      ]
+    ]
+  },
+  "process": {
+    "title": "From input to a useful result",
+    "steps": [
+      {
+        "title": "Read fixture",
+        "detail": "Inert dependency text"
+      },
+      {
+        "title": "Match corpus",
+        "detail": "Ecosystem-filtered rules"
+      },
+      {
+        "title": "Locate findings",
+        "detail": "Rule, severity and line"
+      }
+    ],
+    "result": "The bundled payload text produces rule findings without executing any of its instructions."
+  },
+  "integrations": {
+    "title": "Supported input and output routes",
+    "items": [
+      {
+        "title": "Lockfiles / requirements",
+        "detail": "Supported dependency inputs"
+      },
+      {
+        "title": "Package registries",
+        "detail": "Metadata and text fetch"
+      },
+      {
+        "title": "Rule corpus YAML",
+        "detail": "Pattern definitions"
+      },
+      {
+        "title": "JSON findings",
+        "detail": "Severity and source location"
+      }
+    ]
+  }
+}

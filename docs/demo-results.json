@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "source_revision": "24399d388ded53a13b15822549f1058003c52d60",
+  "scope": "The shipped payload fixture is scanned as inert text through the production corpus. No package download or payload execution.",
+  "steps": [
+    {
+      "label": "Recorded run",
+      "body": "The shipped payload fixture is scanned as inert text through the production corpus. No package download or payload execution.",
+      "command": ".venv/bin/python examples/presentation-demo.py",
+      "output": "input: tests/fixtures/jqwik_payload.txt; text is scanned, never executed\n{\"rule_id\": \"PI-001-imperative-to-agent-delete\", \"severity\": \"critical\", \"line\": 22}\n{\"rule_id\": \"PI-003-ignore-previous-instructions\", \"severity\": \"critical\", \"line\": 31}\n{\"rule_id\": \"PI-101-second-person-to-ai\", \"severity\": \"high\", \"line\": 20}\n{\"rule_id\": \"PI-101-second-person-to-ai\", \"severity\": \"high\", \"line\": 22}\n{\"rule_id\": \"PI-102-role-override\", \"severity\": \"high\", \"line\": 22}\n{\"rule_id\": \"PI-105-conditional-on-agent-context\", \"severity\": \"high\", \"line\": 22}\n{\"rule_id\": \"PI-102-role-override\", \"severity\": \"high\", \"line\": 27}\n{\"rule_id\": \"PI-102-role-override\", \"severity\": \"high\", \"line\": 30}\n{\"rule_id\": \"PI-105-conditional-on-agent-context\", \"severity\": \"high\", \"line\": 30}\n{\"rule_id\": \"PI-202-do-not-tell-user\", \"severity\": \"medium\", \"line\": 26}\n{\"rule_id\": \"PI-201-jailbreak-preamble\", \"severity\": \"medium\", \"line\": 27}\n{\"rule_id\": \"PI-202-do-not-tell-user\", \"severity\": \"medium\", \"line\": 27}"
+    }
+  ]
+}
