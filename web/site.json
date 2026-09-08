@@ -211,5 +211,6 @@
         "code": "promptaudit scan .\npromptaudit scan . --json\npromptaudit rules"
       }
     ]
-  }
+  },
+  "content_version": "v0.10.0"
 }
