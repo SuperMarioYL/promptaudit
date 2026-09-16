@@ -207,8 +207,8 @@
           "zh": "配置"
         },
         "body": {
-          "en": "Supported project inputs include package-lock.json, poetry.lock and requirements.txt. Inspect CLI coverage output when dependency resolution or fetch fails; target Python/platform settings are available for cross-environment resolution. Customize the corpus only with reproducible examples.",
-          "zh": "支持的项目输入包括 package-lock.json、poetry.lock 和 requirements.txt。解析或抓取失败时应检查 CLI 覆盖输出；目标 Python/platform 设置支持跨环境解析。规则定制应基于可复现示例。"
+          "en": "Supported project inputs include package-lock.json, poetry.lock and requirements.txt. Inspect CLI coverage output when dependency resolution or fetch fails; target Python/platform settings are available for cross-environment resolution. A corrupt or malformed manifest (wrong JSON/TOML shape, binary bytes, bad permissions) fails fast with one clean error line naming the file — never a raw traceback — and a crafted registry document degrades to a coverage gap, never a crash. Customize the corpus only with reproducible examples.",
+          "zh": "支持的项目输入包括 package-lock.json、poetry.lock 和 requirements.txt。解析或抓取失败时应检查 CLI 覆盖输出；目标 Python/platform 设置支持跨环境解析。损坏或畸形的清单文件（JSON/TOML 结构错误、二进制字节、权限问题）会以一行干净的错误信息快速失败并指明文件，绝不甩出裸 traceback；被篡改的 registry 文档会降级成覆盖率缺口，而不是让扫描器崩溃。规则定制应基于可复现示例。"
         }
       },
       {
@@ -224,5 +224,5 @@
       }
     ]
   },
-  "content_version": "v0.10.0"
+  "content_version": "v0.11.0"
 }

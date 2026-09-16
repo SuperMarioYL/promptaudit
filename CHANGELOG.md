@@ -4,6 +4,58 @@ All notable changes to PromptAudit are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] — 2026-09-16
+
+Correctness-fix release turning the hardening spotlight from REMOTE registry
+docs (v0.9.0 / v0.10.0) onto the LOCAL manifests the resolver reads first
+(`package-lock.json`, `package.json`, `poetry.lock`, `pyproject.toml`,
+`requirements.txt`) and onto the fetcher's registry-doc consumption. Every fix
+below was reproduced against the shipped v0.10.0 (raw traceback / silent wrong
+output) and ships with an adversarial regression test that is red on the
+v0.10.0 baseline. The invariant across all four fixes: a malformed LOCAL
+manifest is a loud, clean `promptaudit: <message>` error (exit 2) — never a
+crash, never a silent partial scan; a malformed/crafted REMOTE doc degrades to
+an honest coverage gap with an operator-facing reason — never an internal
+exception string.
+
+### Fixed
+
+- **Malformed local manifests no longer crash the CLI with raw
+  AttributeError/TypeError tracebacks.** Nine shape sites consumed manifest
+  fields without validating the parsed shape: a non-dict package-lock.json
+  root (`[]`), a string `lockfileVersion` (`"3"` — `TypeError` on the `>= 2`
+  comparison), a non-dict `packages` map (v2/v3) or `dependencies` map (v1),
+  non-dict lockfile entries, a non-dict package.json `dependencies`
+  (`["a","b"]`), a non-string spec value (`"foo": 42`), and a poetry.lock
+  `package` value that is not a list of tables. All now raise the established
+  clean `ResolverError` (exit 2); the non-string spec is skipped as a
+  malformed entry rather than crashing the walk.
+- **Unreadable, undecodable, or unparseable manifests raise the same clean
+  error.** Only syntactically-broken JSON had the clean-error treatment; a
+  binary package-lock.json leaked `UnicodeDecodeError`, an invalid-TOML
+  poetry.lock leaked `tomllib.TOMLDecodeError`, and an unreadable (chmod 000)
+  or binary requirements.txt leaked `PermissionError` / `UnicodeDecodeError`.
+  All three access sites now raise `ResolverError` naming the file and cause.
+- **A string-valued dependency collection no longer explodes into one bogus
+  dependency per character.** `[project] dependencies = "requests"` in a
+  pyproject.toml (and a crafted PyPI release doc with a string
+  `requires_dist`) were iterated character by character — every letter parses
+  as a valid PEP 508 bare name, so each character became a bogus dep that was
+  resolved, fetched from PyPI, and scanned (verified: `"requests"` yields six
+  phantom packages e/q/r/s/t/u). The local pyproject shape is now a loud
+  `ResolverError`; a non-list remote `requires_dist` degrades to no
+  transitive children (mirroring v0.10.0's non-dict npm `dependencies`
+  treatment), the parent stays resolved and scanned.
+- **Non-string readme/description or non-dict info / non-list urls in a
+  registry doc no longer surface the misattributed last-ditch fetch reason.**
+  The fetcher's own consumption sites (`(manifest.get("readme") or
+  "").strip()`, `payload.get("info") or {}`, `payload.get("urls") or []`)
+  crashed on crafted docs and let `_fetch_one`'s last-ditch handler record
+  `AttributeError: 'int' object has no attribute 'strip'` as the
+  operator-facing UnscannedPackage reason. A non-string field now takes the
+  empty path it already takes when absent (the npm tarball README fallback
+  still runs), and the honest `empty_corpus` coverage gap is reported.
+
 ## [0.10.0] — 2026-09-01
 
 Correctness-fix release continuing the v0.9.0 non-dict-hardening class. The
@@ -417,6 +469,7 @@ report aimed at gating CI.
   ecosystem per minor version.
 - No MCP-server scan mode yet — `awesome-mcp-servers` ingestion is m4.
 
+[0.11.0]: https://github.com/SuperMarioYL/promptaudit/releases/tag/v0.11.0
 [0.10.0]: https://github.com/SuperMarioYL/promptaudit/releases/tag/v0.10.0
 [0.9.0]: https://github.com/SuperMarioYL/promptaudit/releases/tag/v0.9.0
 [0.4.0]: https://github.com/SuperMarioYL/promptaudit/releases/tag/v0.4.0

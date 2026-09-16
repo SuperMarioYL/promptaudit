@@ -223,8 +223,17 @@ def _fetch_npm(
         # (it lives in manifest.dist.tarball), so nothing to fall back to.
         return sources
 
-    readme = (manifest.get("readme") or "").strip()
-    description = (manifest.get("description") or "").strip()
+    # fix-fetcher-nonstring-registry-fields: a crafted/malformed registry doc
+    # (the tool's canonical supply-chain surface) with a non-string
+    # `readme`/`description` (e.g. 42 / ["a"]) would crash on `.strip()` below
+    # and surface the operator-facing fetch reason as the last-ditch
+    # "AttributeError: ..." string. Treat a non-string field as empty — the
+    # exact path an empty/absent field already takes (the tarball fallback
+    # still runs for a non-string readme).
+    readme = manifest.get("readme")
+    readme = readme.strip() if isinstance(readme, str) else ""
+    description = manifest.get("description")
+    description = description.strip() if isinstance(description, str) else ""
 
     if description:
         (target / "summary.txt").write_text(description, encoding="utf-8")
@@ -329,21 +338,32 @@ def _fetch_pypi(
     if not isinstance(payload, dict):
         # Oversized / unparseable registry doc → empty corpus (coverage gap).
         return sources
-    info = payload.get("info") or {}
+    # fix-fetcher-nonstring-registry-fields: the `or {}` default only applies
+    # when `info` is ABSENT or falsy — a truthy non-dict `info` (e.g. ["a"])
+    # would crash on `info.get("summary")` below and surface the last-ditch
+    # "AttributeError: ..." string as the fetch reason. Treat a non-dict
+    # `info` as the empty-info path (no summary/description sources; the sdist
+    # peek below still runs).
+    info = payload.get("info")
+    if not isinstance(info, dict):
+        info = {}
 
-    summary = (info.get("summary") or "").strip()
+    summary = info.get("summary")
+    summary = summary.strip() if isinstance(summary, str) else ""
     if summary:
         (target / "summary.txt").write_text(summary, encoding="utf-8")
         sources["summary"] = "info.summary"
 
-    description = (info.get("description") or "").strip()
+    description = info.get("description")
+    description = description.strip() if isinstance(description, str) else ""
     if description:
         (target / "readme.md").write_text(description, encoding="utf-8")
         sources["readme"] = "info.description"
 
     # Best-effort: peek at the sdist for in-code string literals. Errors here
     # are non-fatal — the scanner can still run on README + summary.
-    sdist_url = _pick_sdist_url(payload.get("urls") or [])
+    urls = payload.get("urls")
+    sdist_url = _pick_sdist_url(urls) if isinstance(urls, list) else None
     if sdist_url:
         candidates = _extract_strings_from_sdist(session, sdist_url)
         if candidates:
@@ -355,6 +375,10 @@ def _fetch_pypi(
 
 def _pick_sdist_url(urls: list[dict]) -> str | None:
     for entry in urls:
+        if not isinstance(entry, dict):
+            # fix-fetcher-nonstring-registry-fields: a crafted/malformed doc
+            # with a non-mapping `urls` entry would crash on entry.get below.
+            continue
         if entry.get("packagetype") == "sdist":
             return entry.get("url")
     return None

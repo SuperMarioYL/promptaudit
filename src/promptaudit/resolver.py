@@ -269,12 +269,30 @@ def _resolve_npm_lockfile(lockfile: Path) -> Iterable[ResolvedPackage]:
     """
     data = _load_json(lockfile)
     lockfile_version = data.get("lockfileVersion", 1)
+    if not isinstance(lockfile_version, int) or isinstance(lockfile_version, bool):
+        # fix-malformed-manifest-shape-crash: a string ``lockfileVersion``
+        # (e.g. ``"3"``) would raise ``TypeError`` on the ``>= 2`` comparison
+        # below. npm always writes an integer; anything else is corruption →
+        # clean error, not a crash.
+        raise ResolverError(
+            f"malformed JSON in {lockfile}: 'lockfileVersion' must be an integer"
+        )
     root_name = data.get("name", "<root>")
 
     if "packages" in data and lockfile_version >= 2:
-        yield from _walk_lockfile_v2(data["packages"], root_name)
+        packages = data["packages"]
+        if not isinstance(packages, dict):
+            raise ResolverError(
+                f"malformed JSON in {lockfile}: 'packages' must be an object"
+            )
+        yield from _walk_lockfile_v2(packages, root_name)
     elif "dependencies" in data:
-        yield from _walk_lockfile_v1(data["dependencies"], parent_path=(root_name,))
+        deps = data["dependencies"]
+        if not isinstance(deps, dict):
+            raise ResolverError(
+                f"malformed JSON in {lockfile}: 'dependencies' must be an object"
+            )
+        yield from _walk_lockfile_v1(deps, parent_path=(root_name,))
     # else: empty lockfile, nothing to yield
 
 
@@ -299,6 +317,15 @@ def _walk_lockfile_v2(packages: dict, root_name: str) -> Iterable[ResolvedPackag
             # packages are not registry-fetchable — skip them. (The v1 walker
             # is unaffected: it walks nested `dependencies`, not path keys.)
             continue
+        if not isinstance(meta, dict):
+            # fix-malformed-manifest-shape-crash: a non-dict entry value
+            # (e.g. "node_modules/foo": "1.0.0") would crash on
+            # ``meta.get("dev")`` below. A corrupt lockfile is a clean-error
+            # condition, not a crash — name the offending entry.
+            raise ResolverError(
+                f"malformed JSON in package-lock.json: entry '{path_key}' "
+                f"must be an object, got {type(meta).__name__}"
+            )
         if meta.get("dev") or meta.get("peer") or meta.get("optional"):
             # v0.1 scope: runtime deps only. devDeps are not pulled at install.
             continue
@@ -316,6 +343,14 @@ def _walk_lockfile_v1(
     deps: dict, parent_path: tuple[str, ...]
 ) -> Iterable[ResolvedPackage]:
     for name, meta in deps.items():
+        if not isinstance(meta, dict):
+            # fix-malformed-manifest-shape-crash: a non-dict entry value
+            # (e.g. "foo": "1.0.0") would crash on ``meta.get("dev")`` below.
+            # A corrupt lockfile is a clean-error condition, not a crash.
+            raise ResolverError(
+                f"malformed JSON in package-lock.json: entry '{name}' "
+                f"must be an object, got {type(meta).__name__}"
+            )
         if meta.get("dev") or meta.get("peer") or meta.get("optional"):
             # v0.1 scope: runtime deps only — mirror _walk_lockfile_v2 so v1
             # and v2 lockfiles share runtime-only semantics (don't resolve,
@@ -360,6 +395,14 @@ def _resolve_npm_package_json(
     direct = data.get("dependencies", {}) or {}
     if not direct:
         return
+    if not isinstance(direct, dict):
+        # fix-malformed-manifest-shape-crash: a truthy non-dict
+        # `dependencies` (e.g. a list) would crash on ``direct.items()``
+        # below. A malformed manifest is a clean-error condition — the user's
+        # file needs fixing, and silently scanning nothing would false-clean.
+        raise ResolverError(
+            f"malformed JSON in {manifest.name}: 'dependencies' must be an object"
+        )
 
     visited: set[tuple[str, str]] = set()
     skipped_seen: set[tuple[str, str]] = set()
@@ -374,6 +417,14 @@ def _resolve_npm_package_json(
     max_depth = 6  # bounded to avoid runaway network walks without a lockfile
     while queue:
         name, spec, via = queue.pop(0)
+        if not isinstance(spec, str):
+            # fix-malformed-manifest-shape-crash: a non-string spec value
+            # (e.g. "foo": 42 in a hand-malformed package.json, or the same
+            # shape in a crafted registry doc's `dependencies` map) would
+            # crash on ``(spec or "").strip()`` in _is_non_registry_spec.
+            # Skip the malformed entry — one bad dep value is not worth
+            # crashing the whole walk over.
+            continue
         if len(via) > max_depth:
             continue
         if _is_non_registry_spec(spec):
@@ -697,10 +748,30 @@ def _resolve_poetry_lock(lockfile: Path) -> Iterable[ResolvedPackage]:
     """Parse poetry.lock (TOML, stdlib tomllib in 3.11+)."""
     import tomllib  # stdlib in 3.11+
 
-    with lockfile.open("rb") as fh:
-        data = tomllib.load(fh)
+    try:
+        with lockfile.open("rb") as fh:
+            data = tomllib.load(fh)
+    except tomllib.TOMLDecodeError as exc:
+        # fix-manifest-read-decode-parse-crash: an invalid-TOML poetry.lock
+        # (corrupt file, bad merge) must hit the clean-error contract, not
+        # crash the CLI with a raw TOMLDecodeError traceback.
+        raise ResolverError(f"malformed TOML in {lockfile.name}: {exc}") from exc
+    except OSError as exc:
+        raise ResolverError(f"unreadable {lockfile.name}: {exc}") from exc
     packages = data.get("package", [])
+    if not isinstance(packages, list):
+        # fix-malformed-manifest-shape-crash: a non-list `package` value would
+        # crash on ``entry.get(...)`` below (iterating a string yields its
+        # characters). Clean error, not a crash.
+        raise ResolverError(
+            f"malformed TOML in {lockfile.name}: 'package' must be a list"
+        )
     for entry in packages:
+        if not isinstance(entry, dict):
+            raise ResolverError(
+                f"malformed TOML in {lockfile.name}: 'package' entries must "
+                f"be tables, got {type(entry).__name__}"
+            )
         if entry.get("category") == "dev":
             # poetry < 1.5 marked dev deps with category; newer uses groups.
             continue
@@ -795,7 +866,17 @@ def _collect_requirements_deps(
         return
     visited.add(real)
     base_dir = real.parent
-    raw_text = req_file.read_text(encoding="utf-8")
+    try:
+        raw_text = req_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        # fix-manifest-read-decode-parse-crash: an unreadable (permissions) or
+        # undecodable (binary bytes) requirements file must hit the clean-error
+        # contract, not crash the CLI with a raw PermissionError /
+        # UnicodeDecodeError traceback.
+        raise ResolverError(
+            f"malformed requirements file {req_file}: unreadable or not valid "
+            f"UTF-8: {exc}"
+        ) from exc
     for raw in _join_continued_lines(raw_text).splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -954,7 +1035,13 @@ def _pyproject_has_project_deps(pyproject: Path) -> bool:
             data = tomllib.load(fh)
     except Exception:
         return False
-    return bool(data.get("project", {}).get("dependencies"))
+    project = data.get("project")
+    if not isinstance(project, dict):
+        # fix-malformed-manifest-shape-crash: a non-dict [project] table would
+        # crash on ``.get("dependencies")`` below; a pyproject without a valid
+        # [project] table simply has no project deps to probe.
+        return False
+    return bool(project.get("dependencies"))
 
 
 def _resolve_pyproject_project_deps(
@@ -967,7 +1054,23 @@ def _resolve_pyproject_project_deps(
 
     with pyproject.open("rb") as fh:
         data = tomllib.load(fh)
-    deps = data.get("project", {}).get("dependencies", []) or []
+    project = data.get("project")
+    if not isinstance(project, dict):
+        # Unreachable via resolve() (the _pyproject_has_project_deps probe
+        # rejects a non-dict [project] first) — kept as a defensive guard.
+        project = {}
+    deps = project.get("dependencies") or []
+    if not isinstance(deps, list):
+        # fix-nonlist-dep-collection-per-char-explosion: a string-valued
+        # `[project] dependencies` (e.g. `dependencies = "requests"`) would be
+        # iterated CHARACTER BY CHARACTER below — every letter parses as a
+        # valid PEP 508 bare-name requirement, so each character became a
+        # bogus dep that was resolved, fetched, and scanned. A malformed LOCAL
+        # manifest is a loud clean-error condition, not a silent wrong tree.
+        raise ResolverError(
+            f"malformed TOML in {pyproject.name}: [project] dependencies must "
+            f"be a list, got {type(deps).__name__}"
+        )
     session = _http_session()
     direct: list[tuple[str, "str | None | _PinFailed"]] = []
     for raw in deps:
@@ -1157,6 +1260,17 @@ def _walk_pypi(
         # PEP 508: requires_dist is null when the package declares no deps —
         # this is "no deps", not an error (build_notes).
         requires_dist = info.get("requires_dist") or []
+        if not isinstance(requires_dist, list):
+            # fix-nonlist-dep-collection-per-char-explosion: a crafted/
+            # malformed release doc whose `requires_dist` is a STRING (e.g.
+            # "requests") would be iterated CHARACTER BY CHARACTER below —
+            # every letter parses as a valid PEP 508 bare-name requirement,
+            # so each character became a bogus dep that was resolved, fetched,
+            # and scanned (a registry GET per character, garbage report rows).
+            # Degrade to "no transitive children" — the same treatment v0.10.0
+            # gives a non-dict npm `dependencies`; the parent stays resolved
+            # and scanned.
+            requires_dist = []
         for raw in requires_dist:
             try:
                 req = Requirement(raw)
@@ -1242,9 +1356,28 @@ def _marker_applies(
 
 def _load_json(path: Path) -> dict:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise ResolverError(f"malformed JSON in {path}: {exc}") from exc
+    except (OSError, UnicodeDecodeError) as exc:
+        # fix-manifest-read-decode-parse-crash: a binary / unreadable manifest
+        # (truncated download, editor droppings, wrong permissions) must hit
+        # the same clean-error contract as a syntactically-broken one — only
+        # JSONDecodeError was caught before, so UnicodeDecodeError/OSError
+        # crashed the CLI with a raw traceback.
+        raise ResolverError(
+            f"malformed JSON in {path}: unreadable or not valid UTF-8: {exc}"
+        ) from exc
+    if not isinstance(data, dict):
+        # fix-malformed-manifest-shape-crash: a parsed-but-wrong-shaped root
+        # (e.g. package-lock.json containing `[]`) would crash on
+        # ``data.get(...)`` below. Route it through the same clean-error
+        # contract instead.
+        raise ResolverError(
+            f"malformed JSON in {path}: root must be a JSON object, "
+            f"got {type(data).__name__}"
+        )
+    return data
 
 
 def _get_registry_json(
