@@ -207,8 +207,8 @@
           "zh": "配置"
         },
         "body": {
-          "en": "Supported project inputs include package-lock.json, poetry.lock and requirements.txt. Inspect CLI coverage output when dependency resolution or fetch fails; target Python/platform settings are available for cross-environment resolution. A corrupt or malformed manifest (wrong JSON/TOML shape, binary bytes, bad permissions) fails fast with one clean error line naming the file — never a raw traceback — and a crafted registry document degrades to a coverage gap, never a crash. Customize the corpus only with reproducible examples.",
-          "zh": "支持的项目输入包括 package-lock.json、poetry.lock 和 requirements.txt。解析或抓取失败时应检查 CLI 覆盖输出；目标 Python/platform 设置支持跨环境解析。损坏或畸形的清单文件（JSON/TOML 结构错误、二进制字节、权限问题）会以一行干净的错误信息快速失败并指明文件，绝不甩出裸 traceback；被篡改的 registry 文档会降级成覆盖率缺口，而不是让扫描器崩溃。规则定制应基于可复现示例。"
+          "en": "Supported project inputs include package-lock.json, poetry.lock and requirements.txt. Inspect CLI coverage output when dependency resolution or fetch fails; target Python/platform settings are available for cross-environment resolution, and PEP 508 markers on direct requirements are honoured for that target, so a dependency the target platform does not install is reported as a coverage gap instead of being scanned. A corrupt or malformed manifest (wrong JSON/TOML shape, binary bytes, bad permissions) fails fast with one clean error line naming the file — never a raw traceback — and a crafted registry document degrades to a coverage gap, never a crash. When nothing can be resolved at all, the command reports those gaps and exits non-zero instead of reporting a clean scan. Customize the corpus only with reproducible examples.",
+          "zh": "支持的项目输入包括 package-lock.json、poetry.lock 和 requirements.txt。解析或抓取失败时应检查 CLI 覆盖输出；目标 Python/platform 设置支持跨环境解析，且直接依赖上的 PEP 508 标记会按该目标环境判断，因此目标平台不会安装的依赖会被报告为覆盖率缺口，而不会被扫描。损坏或畸形的清单文件（JSON/TOML 结构错误、二进制字节、权限问题）会以一行干净的错误信息快速失败并指明文件，绝不甩出裸 traceback；被篡改的 registry 文档会降级成覆盖率缺口，而不是让扫描器崩溃。当完全无法解析任何依赖时，命令会列出这些缺口并以非零码退出，而不是报告一次干净的扫描。规则定制应基于可复现示例。"
         }
       },
       {

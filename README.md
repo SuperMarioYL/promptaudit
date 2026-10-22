@@ -102,7 +102,7 @@ promptaudit rules
 
 ## Configuration
 
-Supported project inputs include package-lock.json, poetry.lock and requirements.txt. Inspect CLI coverage output when dependency resolution or fetch fails; target Python/platform settings are available for cross-environment resolution. Customize the corpus only with reproducible examples.
+Supported project inputs include package-lock.json, poetry.lock and requirements.txt. Inspect CLI coverage output when dependency resolution or fetch fails; target Python/platform settings are available for cross-environment resolution, and PEP 508 markers on direct requirements are honoured for that target, so a dependency the target platform does not install is reported as a coverage gap instead of being scanned. A corrupt or malformed manifest fails fast with one clean error line naming the file, never a raw traceback; when nothing can be resolved at all, the command reports those coverage gaps and exits non-zero instead of reporting a clean scan. Customize the corpus only with reproducible examples.
 
 ## Integrations and responsibilities
 
