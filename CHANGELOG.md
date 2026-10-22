@@ -4,6 +4,65 @@ All notable changes to PromptAudit are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] — 2026-10-23
+
+Correctness-fix release closing the last holes on the coverage-signal contract
+and on the resolver's shape/version handling. Two of the four fixes make the
+tool report a clean exit 0 for work it never did — the exact failure mode every
+release since v0.3.0 has been closing — and the other two leave the final
+unguarded sites of the classes v0.11.0 claimed to have finished. Every fix was
+reproduced against the shipped v0.11.0 source and ships with a regression test
+that is red on that baseline.
+
+### Fixed
+
+- **An all-coverage-gap project no longer reports "nothing to scan" and exits
+  0.** `scan` short-circuited on an empty resolved set *before* the coverage
+  pass rendered, so every gap `resolve()` had recorded in `marker_skipped`
+  (`range_unsatisfiable:<spec>`, `npm_doc_not_found`, `pin_failed`,
+  `pypi_release_not_found`, `marker_skipped:<marker>`,
+  `*_include_not_resolved`) was discarded — no findings, exit 0, and with
+  `--json` not even a JSON document. Verified: a project whose only dependency
+  is `{"left-pad": "^99.0.0"}` printed "promptaudit: no dependencies resolved —
+  nothing to scan." and exited 0. The gaps are now rendered (JSON included) and
+  the command exits 3; a genuinely dependency-free project keeps the exit-0
+  message. `fetch` was worse — it never passed `marker_skipped` down and printed
+  `ok=0 skipped=0 errors=0` with exit 0 for the same project; it now reports each
+  gap and exits 3.
+- **A malformed poetry.lock entry raises the clean error instead of a raw
+  traceback.** `"dev" in (entry.get("groups") or [])` raised
+  `TypeError: argument of type 'int' is not iterable` for a truthy non-list
+  `groups` (e.g. `groups = 42`), and `canonicalize_name(name)` raised
+  `AttributeError: 'list' object has no attribute 'lower'` for a non-string
+  `name` (e.g. `name = ["requests"]`). Both exited 1 with a raw traceback; both
+  now raise `ResolverError` naming the file and field (exit 2). Real poetry
+  lockfiles are unaffected — across four sampled lock-versions (2.0 and 2.1,
+  1479 entries) `name` is always a string and `groups` is always a list.
+- **A leading-`v` npm version spec resolves instead of vanishing.**
+  `_resolve_npm_dist_tag` treated any spec starting with a letter as a dist-tag,
+  so `v1.3.0` — which npm itself accepts (`npm view left-pad@v1.3.0 version`
+  prints `1.3.0`) — looked up a non-existent `v1.3.0` tag, resolved to nothing,
+  and the dependency was never fetched or scanned. The same missing
+  normalisation silently mis-translated `^v1.2.3` to `>=0.2.3,<0.3.0` instead of
+  `>=1.2.3,<2.0.0`. A `v`/`V` directly followed by a digit is now stripped once,
+  before the exact/dist-tag/range branches; a genuine dist-tag like `vnext` is
+  left alone.
+- **PEP 508 markers on direct requirements.txt / pyproject dependencies are
+  honoured.** Only transitive deps passed through the marker gate, so a direct
+  `requests==2.31.0 ; sys_platform == "win32"` line was resolved, fetched and
+  scanned on Linux/macOS even though pip does not install it there (`pip install
+  --dry-run -r` reports "markers ... don't match your environment") — auditing a
+  version the project never installs, where a critical hit would false-fail CI,
+  and making `--target-platform` / `--target-python` a no-op for direct deps.
+  Such a dep is now recorded as a `marker_skipped:<marker>` coverage gap, and the
+  same line resolves under `--target-platform windows`.
+
+### Added
+
+- `tests/test_version_lockstep.py` — fails mechanically when `pyproject.toml`,
+  `promptaudit.__version__`, the CLI `--version` output, `web/site.json`
+  `content_version` and the `CHANGELOG.md` heading drift apart.
+
 ## [0.11.0] — 2026-09-16
 
 Correctness-fix release turning the hardening spotlight from REMOTE registry
@@ -469,6 +528,7 @@ report aimed at gating CI.
   ecosystem per minor version.
 - No MCP-server scan mode yet — `awesome-mcp-servers` ingestion is m4.
 
+[0.12.0]: https://github.com/SuperMarioYL/promptaudit/releases/tag/v0.12.0
 [0.11.0]: https://github.com/SuperMarioYL/promptaudit/releases/tag/v0.11.0
 [0.10.0]: https://github.com/SuperMarioYL/promptaudit/releases/tag/v0.10.0
 [0.9.0]: https://github.com/SuperMarioYL/promptaudit/releases/tag/v0.9.0

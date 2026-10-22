@@ -522,7 +522,7 @@ def _resolve_npm_dist_tag(session: requests.Session, name: str, spec: str) -> st
       max-satisfying lookup — instead of being passed through verbatim as a
       bogus "version" that 404s and leaves the dep unscanned.
     """
-    spec = (spec or "").strip()
+    spec = _strip_npm_v_prefix((spec or "").strip())
     if _EXACT_NPM_VERSION_RE.match(spec):
         return spec
     if not spec or spec[0].isalpha():
@@ -543,6 +543,24 @@ def _resolve_npm_dist_tag(session: requests.Session, name: str, spec: str) -> st
         return tags.get(spec or "latest")
     # Anything else is a range/version-ish spec — resolve max-satisfying.
     return _resolve_npm_max_satisfying(session, name, spec)
+
+
+# npm tolerates a leading "v" on a version, in a plain spec (``v1.3.0``) and
+# inside a range (``^v1.2.3``): ``semver.valid('v1.3.0')`` is ``'1.3.0'`` and
+# ``npm view left-pad@v1.3.0 version`` / ``npm view left-pad@^v1.0.0 version``
+# both resolve against the registry. Normalise it once, before the exact /
+# dist-tag / range branches, so every branch sees the same spec. Without this,
+# ``v1.3.0`` fell into the dist-tag branch (``spec[0].isalpha()``), the packument
+# carries no ``v1.3.0`` tag, and the dependency was dropped as
+# ``npm_doc_not_found`` without ever being fetched or scanned; ``^v1.2.3`` was
+# silently mis-translated to ``>=0.2.3,<0.3.0`` (the "v" parsed as a version
+# part) instead of ``>=1.2.3,<2.0.0``. Only a ``v`` directly followed by a digit
+# is stripped, so a genuine dist-tag like ``vnext`` is left alone.
+_NPM_V_PREFIX_RE = re.compile(r"^([\^~<>=]*)[vV](?=\d)")
+
+
+def _strip_npm_v_prefix(spec: str) -> str:
+    return _NPM_V_PREFIX_RE.sub(r"\1", spec, count=1)
 
 
 def _resolve_npm_max_satisfying(
@@ -775,17 +793,38 @@ def _resolve_poetry_lock(lockfile: Path) -> Iterable[ResolvedPackage]:
         if entry.get("category") == "dev":
             # poetry < 1.5 marked dev deps with category; newer uses groups.
             continue
-        if "dev" in (entry.get("groups") or []):
+        groups = entry.get("groups") or []
+        if not isinstance(groups, list):
+            # fix-poetry-lock-entry-shape-crash: the ``or []`` guard only catches
+            # a falsy value, so a truthy non-list ``groups`` (e.g. ``groups = 42``)
+            # reached the membership test below and raised
+            # ``TypeError: argument of type 'int' is not iterable``. A corrupt
+            # lockfile is a clean-error condition, not a crash.
+            raise ResolverError(
+                f"malformed TOML in {lockfile.name}: 'groups' for package "
+                f"{entry.get('name')!r} must be a list, got {type(groups).__name__}"
+            )
+        if "dev" in groups:
             continue
         name = entry.get("name")
         version = entry.get("version")
-        if name and version:
-            yield ResolvedPackage(
-                name=canonicalize_name(name),
-                version=str(version),
-                ecosystem="pypi",
-                via_path=("<root>", canonicalize_name(name)),
+        if not name or not version:
+            continue
+        if not isinstance(name, str):
+            # fix-poetry-lock-entry-shape-crash: the truthiness check above only
+            # rejects a falsy name, so a truthy non-string ``name`` (e.g.
+            # ``name = ["requests"]``) reached ``canonicalize_name`` and raised
+            # ``AttributeError: 'list' object has no attribute 'lower'``.
+            raise ResolverError(
+                f"malformed TOML in {lockfile.name}: 'name' must be a string, "
+                f"got {type(name).__name__}"
             )
+        yield ResolvedPackage(
+            name=canonicalize_name(name),
+            version=str(version),
+            ecosystem="pypi",
+            via_path=("<root>", canonicalize_name(name)),
+        )
 
 
 _REQUIREMENTS_INCLUDE_OPTS = {
@@ -839,6 +878,7 @@ def _collect_requirements_deps(
     marker_skipped: list[MarkerSkipped] | None,
     visited: set[Path],
     skipped_seen: set[tuple[str, str]],
+    target_env: dict[str, str] | None = None,
 ) -> None:
     """Parse pinned entries from ``req_file`` into ``direct``, recursing into
     ``-r``/``--requirements`` include files so the included deps are scanned.
@@ -860,6 +900,13 @@ def _collect_requirements_deps(
     parses the PEP 508 name@spec (the v0.7.0 fix-requirements-hashes-silent-drop
     plumbing), so the canonical pip-compile / ``--require-hashes`` pinned
     format still parses.
+
+    fix-requirements-direct-marker-ignored: each parsed requirement's PEP 508
+    marker is evaluated against ``target_env`` (the host by default) and a
+    non-applicable direct dep is recorded as a coverage gap instead of being
+    resolved — pip does not install it, so auditing it would report on a package
+    the project never installs (and would make ``--target-platform`` a no-op for
+    direct deps).
     """
     real = req_file.resolve()
     if real in visited:
@@ -892,6 +939,7 @@ def _collect_requirements_deps(
                     marker_skipped=marker_skipped,
                     visited=visited,
                     skipped_seen=skipped_seen,
+                    target_env=target_env,
                 )
             elif marker_skipped is not None:
                 # A constraints include (not a dep — recursing would scan
@@ -936,7 +984,30 @@ def _collect_requirements_deps(
             req = Requirement(line)
         except Exception:
             continue
-        direct.append((canonicalize_name(req.name), _pin_from_specifier(req, session)))
+        dep_name = canonicalize_name(req.name)
+        if req.marker and not _marker_applies(req.marker, target_env):
+            # fix-requirements-direct-marker-ignored: pip does NOT install a
+            # requirement whose PEP 508 marker does not match the environment
+            # (verified: `pip install --dry-run -r req.txt` prints "Ignoring
+            # <name>: markers '...' don't match your environment"), so resolving
+            # and fetching it audits a version the project never installs — a
+            # false-positive surface (a critical hit there would false-fail CI)
+            # and a no-op ``--target-platform`` for direct deps. Record it as a
+            # coverage gap, mirroring the transitive marker gate in _walk_pypi.
+            if marker_skipped is not None:
+                skip_key = (dep_name, str(req.marker))
+                if skip_key not in skipped_seen:
+                    skipped_seen.add(skip_key)
+                    marker_skipped.append(
+                        MarkerSkipped(
+                            name=dep_name,
+                            ecosystem="pypi",
+                            marker=str(req.marker),
+                            via_path=("<root>", dep_name),
+                        )
+                    )
+            continue
+        direct.append((dep_name, _pin_from_specifier(req, session)))
 
 
 def _resolve_requirements_txt(
@@ -967,6 +1038,7 @@ def _resolve_requirements_txt(
         marker_skipped=marker_skipped,
         visited=set(),
         skipped_seen=set(),
+        target_env=target_env,
     )
     yield from _walk_pypi(
         direct,
@@ -1073,12 +1145,32 @@ def _resolve_pyproject_project_deps(
         )
     session = _http_session()
     direct: list[tuple[str, "str | None | _PinFailed"]] = []
+    skipped_seen: set[tuple[str, str]] = set()
     for raw in deps:
         try:
             req = Requirement(raw)
         except Exception:
             continue
-        direct.append((canonicalize_name(req.name), _pin_from_specifier(req, session)))
+        dep_name = canonicalize_name(req.name)
+        if req.marker and not _marker_applies(req.marker, target_env):
+            # fix-requirements-direct-marker-ignored: the pyproject sibling of
+            # the requirements.txt site above — a direct dep whose marker does
+            # not match the target environment is not installed by pip, so it is
+            # surfaced as a coverage gap instead of being resolved and scanned.
+            if marker_skipped is not None:
+                skip_key = (dep_name, str(req.marker))
+                if skip_key not in skipped_seen:
+                    skipped_seen.add(skip_key)
+                    marker_skipped.append(
+                        MarkerSkipped(
+                            name=dep_name,
+                            ecosystem="pypi",
+                            marker=str(req.marker),
+                            via_path=("<root>", dep_name),
+                        )
+                    )
+            continue
+        direct.append((dep_name, _pin_from_specifier(req, session)))
     yield from _walk_pypi(
         direct,
         root_name="<root>",

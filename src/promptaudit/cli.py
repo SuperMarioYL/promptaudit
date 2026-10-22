@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Iterable
 
 import click
 from rich.console import Console
@@ -34,6 +35,29 @@ EXIT_OK = 0
 EXIT_CRITICAL_FOUND = 1
 EXIT_USAGE_ERROR = 2
 EXIT_FETCH_ERROR = 3  # coverage gap: a dep could not be fetched / was unscanned
+
+
+def _unscanned_from_markers(
+    marker_skipped: Iterable[MarkerSkipped],
+) -> list[UnscannedPackage]:
+    """Turn resolver ``MarkerSkipped`` entries into reportable coverage gaps.
+
+    These are dependencies the resolver could not hand to the scanner at all —
+    dropped by a PEP 508 marker, an unsatisfiable range/tag, a failed pin lookup,
+    or a 404 release doc. The version is unknown (never resolved), so it is
+    reported as ``*`` and the reason carries the marker so the gap stays
+    machine-readable in ``--json``.
+    """
+    return [
+        UnscannedPackage(
+            package=ms.name,
+            version="*",
+            ecosystem=ms.ecosystem,
+            reason=f"marker_skipped:{ms.marker}",
+            via_path=tuple(ms.via_path),
+        )
+        for ms in marker_skipped
+    ]
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
@@ -144,7 +168,11 @@ def scan_cmd(
         click.echo(f"promptaudit: {exc}", err=True)
         sys.exit(EXIT_USAGE_ERROR)
 
-    if not packages:
+    if not packages and not marker_skipped:
+        # A project that resolves to zero packages has two very different
+        # meanings. Only "it declares no dependencies" is a clean nothing-to-scan:
+        # when the resolver recorded coverage gaps instead, the report below must
+        # still run so the gaps are surfaced (fix-empty-resolve-drops-coverage-gaps).
         click.echo("promptaudit: no dependencies resolved — nothing to scan.", err=True)
         sys.exit(EXIT_OK)
 
@@ -194,16 +222,7 @@ def scan_cmd(
     # the project's real runtime target — surface them as unscanned (with the
     # marker) rather than letting them vanish silently. version is unknown (never
     # resolved), so report "*".
-    for ms in marker_skipped:
-        unscanned.append(
-            UnscannedPackage(
-                package=ms.name,
-                version="*",
-                ecosystem=ms.ecosystem,
-                reason=f"marker_skipped:{ms.marker}",
-                via_path=tuple(ms.via_path),
-            )
-        )
+    unscanned.extend(_unscanned_from_markers(marker_skipped))
     actually_scanned = len(scanned_pkgs)
 
     if as_json:
@@ -228,12 +247,16 @@ def scan_cmd(
 
     if actually_scanned == 0:
         # Zero packages scanned = a coverage failure (cold cache under
-        # --no-fetch, or every fetch errored). Never exit 0 clean — a cold-cache
-        # --no-fetch run must not masquerade as a clean scan.
-        console.print(
-            "[bold red]✗ scanned 0 packages — run without --no-fetch to populate "
-            "the cache, or review the fetch warnings above.[/bold red]"
+        # --no-fetch, or every fetch errored, or nothing could be resolved at
+        # all). Never exit 0 clean — a cold-cache --no-fetch run must not
+        # masquerade as a clean scan.
+        hint = (
+            "no dependency could be resolved — see the coverage gaps above"
+            if not packages
+            else "run without --no-fetch to populate the cache, or review the "
+            "fetch warnings above"
         )
+        console.print(f"[bold red]✗ scanned 0 packages — {hint}.[/bold red]")
         sys.exit(EXIT_FETCH_ERROR)
     if has_critical(findings):
         sys.exit(EXIT_CRITICAL_FOUND)
@@ -256,8 +279,13 @@ def scan_cmd(
 @click.option("--force", is_flag=True, default=False, help="Re-fetch even if cached.")
 def fetch_cmd(project_root: Path, cache_root: Path | None, force: bool) -> None:
     """Resolve PROJECT_ROOT and warm the per-package text cache."""
+    # Thread the coverage gaps through here too: without this, a project whose
+    # only dependencies are unresolvable printed "ok=0 skipped=0 errors=0" and
+    # exited 0, hiding every gap the resolver had recorded
+    # (fix-empty-resolve-drops-coverage-gaps).
+    marker_skipped: list[MarkerSkipped] = []
     try:
-        packages = resolve(project_root)
+        packages = resolve(project_root, marker_skipped=marker_skipped)
     except ResolverError as exc:
         click.echo(f"promptaudit: {exc}", err=True)
         sys.exit(EXIT_USAGE_ERROR)
@@ -269,13 +297,15 @@ def fetch_cmd(project_root: Path, cache_root: Path | None, force: bool) -> None:
         f"fetched: ok={ok} skipped={skipped} errors={errored} "
         f"(cache={(cache_root or DEFAULT_CACHE_ROOT)})"
     )
+    for u in _unscanned_from_markers(marker_skipped):
+        click.echo(f"coverage gap: {u.ecosystem}:{u.package} ({u.reason})")
     # Exit 3 (EXIT_FETCH_ERROR) on a fetch error — NOT 1 (EXIT_CRITICAL_FOUND),
     # which is the ``scan`` subcommand's contract for "a critical finding
     # landed". ``fetch`` produces no findings; reusing exit 1 for a coverage
     # gap collided with ``scan``'s critical-finding signal and false-positived
     # any CI gate branching on ``$? -eq 1``. Align both subcommands on exit 3
-    # for coverage gaps.
-    sys.exit(EXIT_OK if errored == 0 else EXIT_FETCH_ERROR)
+    # for coverage gaps, which includes an unresolved dependency.
+    sys.exit(EXIT_OK if errored == 0 and not marker_skipped else EXIT_FETCH_ERROR)
 
 
 @main.command("rules")
