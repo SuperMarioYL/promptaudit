@@ -102,7 +102,7 @@ promptaudit rules
 
 ## 配置
 
-支持的项目输入包括 package-lock.json、poetry.lock 和 requirements.txt。解析或抓取失败时应检查 CLI 覆盖输出；目标 Python/platform 设置支持跨环境解析。规则定制应基于可复现示例。
+支持的项目输入包括 package-lock.json、poetry.lock 和 requirements.txt。解析或抓取失败时应检查 CLI 覆盖输出；目标 Python/platform 设置支持跨环境解析，直接依赖上的 PEP 508 标记会按目标环境求值，因此目标平台不会安装的依赖会被报告为覆盖缺口而不是被扫描。损坏或格式错误的清单、格式错误的 `--corpus` 规则文件以及异常形状的注册表文档都会快速失败，只输出一行指明原因的错误，绝不抛出原始 traceback；当完全无法解析时，命令会报告这些覆盖缺口并以非零状态退出，而不是报告一次干净扫描。`==1.2.*` 这类前缀版本约束与 `-rbase.txt` 这类包含写法会按 `pip` 的语义解析，而不会从扫描集合中消失。规则定制应基于可复现示例。
 
 ## 集成与职责分工
 

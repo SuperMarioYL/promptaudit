@@ -245,8 +245,13 @@ def _fetch_npm(
     else:
         # Build note: many popular npm packages (e.g. express) have an empty
         # `readme` field on the version document — fall back to the tarball.
-        tarball_url = (manifest.get("dist") or {}).get("tarball")
-        if tarball_url:
+        # fix-v0130: the `or {}` default only applies to a FALSY `dist`, so a
+        # truthy non-dict `dist` (e.g. ``"dist": ["x"]``) raised AttributeError
+        # here and the last-ditch handler surfaced that internal string as the
+        # operator-facing coverage-gap reason. Skip the fallback instead.
+        dist = manifest.get("dist")
+        tarball_url = dist.get("tarball") if isinstance(dist, dict) else None
+        if tarball_url and isinstance(tarball_url, str):
             extracted = _extract_readme_from_tarball(session, tarball_url)
             if extracted:
                 (target / "readme.md").write_text(extracted, encoding="utf-8")

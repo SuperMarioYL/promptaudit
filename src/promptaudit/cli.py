@@ -23,7 +23,7 @@ from . import __version__
 from .fetcher import DEFAULT_CACHE_ROOT, fetch_all
 from .report import render_json, render_terminal
 from .resolver import MarkerSkipped, ResolverError, resolve
-from .rules import SEVERITY_ORDER, load_rules
+from .rules import SEVERITY_ORDER, RuleError, load_rules
 from .scanner import (
     UnscannedPackage,
     has_critical,
@@ -152,6 +152,17 @@ def scan_cmd(
 ) -> None:
     """Resolve, fetch, and scan PROJECT_ROOT for prompt-injection payloads."""
     console = Console(stderr=as_json)  # keep stdout clean when emitting JSON
+    # Load the rule corpus BEFORE resolving/fetching: --corpus is operator input
+    # and a malformed catalog must hit the same clean ``promptaudit: <message>``
+    # + exit-2 contract as a malformed manifest, not escape click as a raw
+    # RuleError traceback whose exit 1 collides with scan's critical-finding code.
+    # Loading it here also means a bad catalog fails fast instead of after a
+    # full registry walk.
+    try:
+        rules = load_rules(corpus)
+    except RuleError as exc:
+        click.echo(f"promptaudit: {exc}", err=True)
+        sys.exit(EXIT_USAGE_ERROR)
     # Collect transitive deps dropped by a non-applicable PEP 508 marker so the
     # coverage gap is surfaced (not silently dropped) — a win32/old-python/extras
     # marker evaluates False on the scanner host yet IS installed on the project's
@@ -195,7 +206,7 @@ def scan_cmd(
                 (r.package.ecosystem, r.package.name, r.package.version)
             ] = r.message or "fetch_error"
 
-    findings = scan(packages, cache_root=cache_root, corpus_path=corpus)
+    findings = scan(packages, cache_root=cache_root, rules=rules)
 
     # Coverage: which resolved packages actually had cached source text to scan?
     # A cold/partial cache under --no-fetch (or a total fetch failure) must not
@@ -316,7 +327,13 @@ def fetch_cmd(project_root: Path, cache_root: Path | None, force: bool) -> None:
 )
 def rules_cmd(corpus: Path | None) -> None:
     """List the loaded rule corpus, grouped by severity."""
-    rules = load_rules(corpus)
+    try:
+        rules = load_rules(corpus)
+    except RuleError as exc:
+        # Same clean-error contract as scan: a malformed --corpus is operator
+        # input, not a crash (and exit 1 would read as "critical finding").
+        click.echo(f"promptaudit: {exc}", err=True)
+        sys.exit(EXIT_USAGE_ERROR)
     rules_by_severity: dict[str, list] = {sev: [] for sev in SEVERITY_ORDER}
     for r in rules:
         rules_by_severity.setdefault(r.severity, []).append(r)

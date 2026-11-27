@@ -663,12 +663,26 @@ def _npm_alt_to_specifierset(alt: str) -> SpecifierSet:
     if alt in ("", "*", "x", "X"):
         return SpecifierSet("")
 
-    # Caret: ^1.2.3 -> >=1.2.3,<2.0.0 ; ^0.2.3 -> >=0.2.3,<0.3.0 ; ^0.0.3 -> >=0.0.3,<0.0.4
+    # Caret: ^1.2.3 -> >=1.2.3,<2.0.0 ; ^0.2.3 -> >=0.2.3,<0.3.0 ;
+    # ^0.0.3 -> >=0.0.3,<0.0.4. The upper bound depends on the left-most
+    # SPECIFIED component (node-semver's rule): when the patch is missing or a
+    # wildcard, ``^0.0`` / ``^0.0.x`` mean ``<0.1.0`` and ``^0.x`` means
+    # ``<1.0.0`` — not the ``<0.0.1`` that the explicit-patch rule would give,
+    # a band nothing above 0.0.0 satisfies (so the dep was reported as
+    # range_unsatisfiable while ``npm install`` picks 0.0.5).
     if alt.startswith("^"):
-        major, minor, patch = _npm_version_parts(alt[1:])
+        body = alt[1:]
+        major, minor, patch = _npm_version_parts(body)
+        segs = [s for s in body.replace("-", ".").split(".") if s != ""]
+        minor_known = len(segs) >= 2 and segs[1].isdigit()
+        patch_known = len(segs) >= 3 and segs[2].isdigit()
         lower = f"{major}.{minor}.{patch}"
         if major > 0:
             upper = f"{major + 1}.0.0"
+        elif not minor_known:
+            upper = "1.0.0"
+        elif not patch_known:
+            upper = "0.1.0" if minor == 0 else f"0.{minor + 1}.0"
         elif minor > 0:
             upper = f"0.{minor + 1}.0"
         else:
@@ -863,6 +877,13 @@ def _requirements_include_path(
         return None
     kind = _REQUIREMENTS_INCLUDE_OPTS.get(head)
     if not kind:
+        # Attached short-option form: pip's getopt-style short options take the
+        # value glued to the flag (``-rbase.txt`` / ``-cbase.txt``). Without
+        # this, the helper returned None, the include was then skipped as a
+        # ``-`` directive below, and every dep in the included file vanished
+        # from packages/missing/marker_skipped — a silent partial-tree clean.
+        if head[:2] in ("-r", "-c") and len(head) > 2:
+            return (base_dir / head[2:]).resolve(), _REQUIREMENTS_INCLUDE_OPTS[head[:2]]
         return None
     # Space form: ``-r base.txt`` (the path is the next token).
     if len(tokens) >= 2 and tokens[1]:
@@ -1198,12 +1219,21 @@ def _pin_from_specifier(
     surfaces it as a coverage gap instead of falling through to latest.
     """
     has_tilde = False
+    has_prefix_match = False
     for spec in req.specifier:
         if spec.operator in ("==", "==="):
+            if "*" in spec.version:
+                # PEP 440 prefix match (``==1.2.*``) is a RANGE, not a version.
+                # Returning the literal "1.2.*" made the walk GET
+                # ``/pypi/<name>/1.2.*/json``, which 404s, so a legal pin became
+                # a ``pypi_release_not_found`` coverage gap and the version pip
+                # would actually install was never audited.
+                has_prefix_match = True
+                continue
             return spec.version
         if spec.operator == "~=":
             has_tilde = True
-    if has_tilde and session is not None:
+    if (has_tilde or has_prefix_match) and session is not None:
         return _resolve_pypi_max_satisfying(session, req.name, req.specifier)
     return None
 
@@ -1499,9 +1529,18 @@ def _get_registry_json(
     if body is None:
         return None
     try:
-        return json.loads(body.decode("utf-8", errors="replace"))
+        parsed = json.loads(body.decode("utf-8", errors="replace"))
     except (json.JSONDecodeError, UnicodeDecodeError):
         return None
+    if not isinstance(parsed, dict):
+        # A 200 whose JSON ROOT is not an object (list/scalar from a misbehaving
+        # registry proxy or a crafted endpoint) reached ``.get(...)`` at every
+        # caller and raised AttributeError out of resolve(), which the CLI does
+        # not catch — a raw traceback whose exit 1 collides with scan's
+        # EXIT_CRITICAL_FOUND. Treat it as the same unusable-doc sentinel the
+        # transport/parse failures return, so the dep becomes a coverage gap.
+        return None
+    return parsed
 
 
 def _http_session() -> requests.Session:

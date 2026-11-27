@@ -4,6 +4,78 @@ All notable changes to PromptAudit are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] — 2026-11-28
+
+Correctness-fix release closing five defect classes found by reading the shipped
+v0.12.0 source and reproducing each one against it. Four of the five break the
+invariant every release since v0.3.0 has been guarding: a result the tool could
+not compute must never be reported as clean, and a bad input must never be
+reported as a crash or as a critical finding. Two crashes exited 1 — the same
+code `scan` uses for "a critical payload landed" — and two legal manifest forms
+silently disappeared from the scanned set. The fifth audited a version npm would
+never install.
+
+### Fixed
+
+- **A malformed `--corpus` raises the clean `promptaudit:` error (exit 2)
+  instead of a raw traceback.** `scan` and `rules` called `load_rules()` with no
+  `RuleError` handling, so any catalog defect `rules.py` validates (non-mapping
+  root, missing/empty `rules` list, invalid severity/kind, uncompilable pattern,
+  duplicate id) escaped click as a traceback with exit 1 — colliding with
+  `scan`'s critical-finding exit code, and only after `scan` had already walked
+  the registry. Verified: `promptaudit rules --corpus bad.yaml` with
+  `rules: 42` printed a traceback and exited 1. The corpus is now loaded and
+  validated at the top of `scan` (fail fast, before any resolution/fetch) and
+  the same clean-error path is used by `rules`.
+- **A registry response whose JSON root is not an object is a coverage gap, not
+  an `AttributeError`.** `_get_registry_json` returned whatever the body parsed
+  to, and every caller then called `.get(...)` on it (`dist-tags`, `versions`,
+  `dependencies`, `releases`, `info`). A 200 whose root is a JSON array — a
+  misbehaving proxy, a captive portal, or a crafted endpoint, the exact surface
+  this tool audits — raised `AttributeError: 'list' object has no attribute
+  'get'` out of `resolve()`; the CLI catches only `ResolverError`, so the run
+  died with a traceback and exit 1. The root shape is now validated once in
+  `_get_registry_json`, so an odd-shaped doc degrades to the documented gap
+  (`npm_doc_not_found` / `pypi_release_not_found` / `pin_failed`). The npm
+  fetcher's sibling site is closed with it: a truthy non-dict `dist` used to
+  surface the internal `AttributeError: ...` string as the operator-facing fetch
+  reason; it now skips the tarball fallback and reports the honest
+  `empty_corpus`.
+- **A PEP 440 prefix pin (`foo==1.2.*`) resolves instead of becoming a coverage
+  gap.** `_pin_from_specifier` returned `spec.version` for every `==`/`===`
+  operator, so a prefix match requested `https://pypi.org/pypi/foo/1.2.*/json`,
+  took the 404, and was reported as `pypi_release_not_found` — the version
+  `pip install` actually picks (1.2.5) was never audited, and on a project whose
+  only pin is a prefix pin the CLI exited 3 having scanned nothing. A `==` value
+  containing `*` is now treated as the range it is and resolved through the
+  existing max-satisfying lookup (a failed lookup is a `pin_failed` gap, never a
+  fall-through to registry latest). Exact pins still need no releases lookup.
+- **A requirements include written in pip's attached short-option form
+  (`-rbase.txt` / `-cbase.txt`) is no longer silently dropped.** The include
+  helper knew only the space (`-r base.txt`) and equals
+  (`--requirements=base.txt`) forms; pip also accepts the value glued to the
+  short flag. Such a line fell through to the `startswith("-")` skip, so every
+  dep listed only in the included file vanished from `packages`, from the
+  coverage `missing` set, and from the coverage markers. Verified: a
+  `requirements.txt` of `-rbase.txt` with `foo==1.0.0` in `base.txt` printed
+  "promptaudit: no dependencies resolved — nothing to scan." and exited 0.
+  `-r` includes are now recursed and `-c` includes keep producing the
+  `constraints_include_not_resolved` marker.
+- **An npm caret range with no explicit patch at major 0 (`^0.0`, `^0.0.x`,
+  `^0.x`) gets npm's real upper bound.** The caret branch always applied the
+  explicit-patch rule `<0.0.patch+1` when major and minor were 0, so `^0.0` and
+  `^0.0.x` produced the unsatisfiable `>=0.0.0,<0.0.1` (npm: `<0.1.0`) and
+  `^0.x` the same (npm: `<1.0.0`). A registry publishing 0.0.5 therefore yielded
+  no candidate and the dependency was reported as `range_unsatisfiable:^0.0` and
+  never scanned, while `npm install` installs 0.0.5. The bound now follows
+  whichever components the spec actually specifies.
+
+### Added
+
+- `tests/test_v0130_fixes.py` — eleven regression tests for the five defect
+  classes above; ten are red on the v0.12.0 baseline (the eleventh pins the
+  unchanged exact-pin path).
+
 ## [0.12.0] — 2026-10-23
 
 Correctness-fix release closing the last holes on the coverage-signal contract
